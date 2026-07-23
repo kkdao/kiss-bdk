@@ -19,8 +19,6 @@ signer written in C—keeps the private keys offline and approves signatures.
 - **KISS** verifies the transaction offline, signs it, and returns the signed
   PSBT as animated BC-UR QR.
 
-No Sparrow, phone, SD card, or private-key import is required for the QR flow.
-
 ```text
 Testnet4 / Esplora ↔ Rust + BDK ↔ PSBT over QR ↔ KISS C signer
 ```
@@ -38,8 +36,7 @@ BDK is the wallet engine, not the network server and not the signer.
 
 ## Build
 
-Requirements: Rust, a C compiler, and a webcam. The current hardware flow is
-tested on macOS.
+Requirements: Rust, a C compiler, and a webcam. The current hardware flow is tested on macOS.
 
 ```sh
 cargo test --locked
@@ -57,8 +54,7 @@ mkdir -p hackathon-demo
 cd hackathon-demo
 ```
 
-On KISS, enable Testnet, unlock the wallet, then open **PAIR COORDINATOR →
-DESKTOP**.
+On KISS, enable Testnet, unlock the wallet, then open **PAIR COORDINATOR → DESKTOP**.
 
 ```sh
 ../target/release/kiss-bdk init --scan-qr
@@ -66,8 +62,7 @@ DESKTOP**.
 ../target/release/kiss-bdk address
 ```
 
-Compare the address on KISS, fund it with Testnet4 coins, and sync again. A
-pending faucet payment is sufficient for the demo.
+Compare the address on KISS, fund it with Testnet4 coins, and sync again. A pending faucet payment is sufficient for the demo.
 
 ```sh
 ../target/release/kiss-bdk sync
@@ -82,8 +77,7 @@ KISS_DEST='tb1q...'
   --to "$KISS_DEST" --sats 10000 --fee-rate 2 --qr
 ```
 
-On KISS choose **SIGN → SCAN QR**, review the transaction, and sign. While KISS
-displays the animated signed QR:
+On KISS choose **SIGN → SCAN QR**, review the transaction, and sign. While KISS displays the animated signed QR:
 
 ```sh
 ../target/release/kiss-bdk scan
@@ -94,15 +88,13 @@ displays the animated signed QR:
 ```
 
 The CLI retains `unsigned.psbt`, confirms that KISS returned the same
-transaction, verifies the ECDSA signatures, and asks BDK to finalize it before
-broadcasting.
+transaction, verifies the ECDSA signatures, and asks BDK to finalize it before broadcasting.
 
 ## QR implementation
 
 - Computer → KISS: static Base64 PSBT QR.
 - KISS → computer: animated BC-UR `crypto-psbt` QR.
-- Desktop recognition: the vendored MIT-licensed `k_quirc` decoder also used by
-  KISS.
+- Desktop recognition: the vendored `k_quirc` decoder also used by KISS.
 
 ## Proof
 
@@ -110,17 +102,3 @@ The full physical flow produced this accepted Testnet4 transaction:
 
 [8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659](https://mempool.space/testnet4/tx/8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659)
 
-## Safety and scope
-
-This is hackathon software for Testnet4 only. It rejects mainnet addresses,
-private descriptors, incorrect checksums, and unsupported descriptor shapes.
-The computer stores only public wallet data.
-
-This repository contains the standalone BDK coordinator and its QR decoder. It
-does not contain KISS firmware, private KISS development work, wallet databases,
-seeds, or hardware-test PSBT files.
-
-## License
-
-The coordinator is Apache-2.0. Vendored `k_quirc` retains its MIT license in
-`vendor/k_quirc/LICENSE`.
