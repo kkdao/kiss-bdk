@@ -7,8 +7,8 @@
 **Air-gapped Bitcoin transactions powered by BDK and signed by KISS.**
 
 KISS-BDK is an experimental Rust coordinator for Bitcoin Testnet4. Bitcoin Dev
-Kit manages the online, watch-only wallet while KISS—an air-gapped hardware
-signer written in C—keeps the private keys offline and approves signatures.
+Kit manages the online, watch-only wallet while KISS, an air-gapped hardware
+signer written in C, keeps the private keys offline and approves signatures.
 
 ## Live flow
 
