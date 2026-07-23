@@ -1,0 +1,15 @@
+# ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+
+# Test artifacts
+pgm_samples/
+test/build_ci/
+test/validation/failures/
+validation-results.json
+validation-results.csv
+
+# Python
+__pycache__/
+*.py[cod]

@@ -1,0 +1,4 @@
+#ifndef KISS_BDK_DESKTOP_FREERTOS_H
+#define KISS_BDK_DESKTOP_FREERTOS_H
+
+#endif

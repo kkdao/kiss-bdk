@@ -1,0 +1,5 @@
+/target/
+/kiss-bdk-wallet/
+/hackathon-demo/
+*.psbt
+*-qr.png
