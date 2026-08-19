@@ -6,9 +6,10 @@
 
 **Air-gapped Bitcoin transactions powered by BDK**
 
-KISS-BDK is an experimental Rust coordinator for Bitcoin Testnet4. Bitcoin Dev
-Kit manages the online, watch-only wallet while KISS, an air-gapped hardware
-signer written in C, keeps the private keys offline and approves signatures.
+KISS-BDK is an experimental Rust coordinator for the Bitcoin test networks —
+Testnet4 and Signet. Bitcoin Dev Kit manages the online, watch-only wallet while
+KISS, an air-gapped hardware signer written in C, keeps the private keys offline
+and approves signatures.
 
 ## Live flow
 
@@ -20,7 +21,7 @@ signer written in C, keeps the private keys offline and approves signatures.
   PSBT as animated BC-UR QR.
 
 ```text
-Testnet4 / Esplora ↔ Rust + BDK ↔ PSBT over QR ↔ KISS C signer
+Testnet4 or Signet / Esplora ↔ Rust + BDK ↔ PSBT over QR ↔ KISS C signer
 ```
 
 ## What BDK does
@@ -30,9 +31,59 @@ The coordinator uses:
 - `bdk_wallet` for the watch-only descriptor wallet, receive/change derivation,
   SQLite persistence, balances, UTXOs, transaction building, and PSBT
   finalization.
-- `bdk_esplora` for Testnet4 scanning and transaction broadcasting over HTTPS.
+- `bdk_esplora` for chain scanning and transaction broadcasting over HTTPS.
 
 BDK is the wallet engine, not the network server and not the signer.
+
+## Networks
+
+Choose one at `init`; it is fixed for the life of that wallet directory.
+
+```sh
+kiss-bdk init --network signet --scan-qr
+```
+
+| `--network` | Chain | Default Esplora | Faucet |
+| --- | --- | --- | --- |
+| `testnet4` (default) | Testnet4 | `https://mempool.space/testnet4/api` | browser only |
+| `signet` | Signet (BIP-325) | `https://mempool.space/signet/api` | browser only |
+| `mutinynet` | Mutinynet, a custom signet | `https://mutinynet.com/api` | `kiss-bdk faucet` (needs a token) |
+
+The signer needs no change for any of them. Its account is BIP-44 coin type
+`1h`, the keyspace shared by the whole Bitcoin test family, so one KISS
+descriptor derives the same addresses on all three. Mutinynet is a separate
+chain from the default signet despite sharing its address format; its blocks
+are about 30 seconds apart, so a demo confirmation arrives while you are still
+on stage.
+
+Mainnet and regtest are not selectable. Override the backend with
+`--esplora URL` at `init` if you would rather use your own.
+
+Because all three share one address format, a `tb1...` address is valid on every
+one of them and neither this CLI nor KISS can tell them apart. Keep one
+`--wallet-dir` per network; a wallet directory is pinned to the network it was
+created on, and `init` refuses to overwrite an existing one.
+
+## Topping up
+
+```sh
+kiss-bdk faucet --sats 100000
+```
+
+This derives the wallet's next unused receive address, prints it, and asks that
+network's faucet for coins. `--address` tops up some other address instead.
+
+No public faucet on these networks will fund an anonymous script, so what the
+command can do depends on the network:
+
+- **Mutinynet** is the only one with a callable API, and it requires an
+  `Authorization: Bearer` token. Sign in with GitHub once at
+  <https://faucet.mutinynet.com/>, then pass `--token` or export
+  `MUTINYNET_FAUCET_TOKEN` and the top-up is a single command. It sends at most
+  1,000,000 sats per request. The token is never printed or persisted.
+- **Testnet4 and Signet** faucets are all Cloudflare-Turnstile-protected, so the
+  command prints the address and the faucet links for you to paste into a
+  browser rather than pretending it can claim.
 
 ## Build
 
@@ -62,7 +113,7 @@ On KISS, enable Testnet, unlock the wallet, then open **PAIR COORDINATOR → DES
 ../target/release/kiss-bdk address
 ```
 
-Compare the address on KISS, fund it with Testnet4 coins, and sync again. A pending faucet payment is sufficient for the demo.
+Compare the address on KISS, fund it with that network's coins, and sync again. A pending faucet payment is sufficient for the demo.
 
 ```sh
 ../target/release/kiss-bdk sync

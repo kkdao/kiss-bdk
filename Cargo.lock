@@ -800,6 +800,7 @@ dependencies = [
  "clap",
  "image",
  "minicbor",
+ "minreq",
  "nokhwa",
  "nokhwa-bindings-macos",
  "qrcode",
