@@ -57,14 +57,15 @@ impl BlindbitClient {
     /// scanning past what it has indexed would silently skip payments.
     pub fn block_height(&self) -> Result<u32> {
         let body = self.get("block-height")?;
-        let parsed: BlockHeight =
-            serde_json::from_str(&body).context("parsing the BlindBit block height")?;
+        let parsed: BlockHeight = serde_json::from_str(&body)
+            .with_context(|| format!("BlindBit block height was {}", snippet(&body)))?;
         Ok(parsed.block_height)
     }
 
     pub fn info(&self) -> Result<Info> {
         let body = self.get("info")?;
-        serde_json::from_str(&body).context("parsing the BlindBit server info")
+        serde_json::from_str(&body)
+            .with_context(|| format!("BlindBit server info was {}", snippet(&body)))
     }
 
     /// The candidate tweaks for one block.
@@ -86,16 +87,29 @@ impl BlindbitClient {
             .trim()
             .to_string();
         if !(200..300).contains(&status) {
-            bail!("BlindBit server returned HTTP {status}: {text}");
+            bail!("BlindBit server returned HTTP {status}: {}", snippet(&text));
         }
         Ok(text)
     }
 }
 
+/// Keep an error readable when a URL that is not a tweak oracle answers with a
+/// web page. Pasting a whole HTML document into the terminal buries the point,
+/// which is that the URL is wrong.
+fn snippet(body: &str) -> String {
+    const MAX: usize = 120;
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > MAX {
+        format!("{:?}…", flat.chars().take(MAX).collect::<String>())
+    } else {
+        format!("{flat:?}")
+    }
+}
+
 /// Split out so the wire format can be tested without a server.
 fn parse_tweaks(body: &str) -> Result<Vec<PublicKey>> {
-    let hexes: Vec<String> =
-        serde_json::from_str(body).context("parsing the BlindBit tweak list")?;
+    let hexes: Vec<String> = serde_json::from_str(body)
+        .with_context(|| format!("BlindBit tweak list was {}", snippet(body)))?;
     hexes
         .iter()
         .map(|hex| {
@@ -106,7 +120,7 @@ fn parse_tweaks(body: &str) -> Result<Vec<PublicKey>> {
 }
 
 fn decode_hex(hex: &str) -> Result<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         bail!("odd number of hex digits");
     }
     (0..hex.len())
@@ -162,6 +176,17 @@ mod tests {
         .unwrap();
         assert_eq!(info.network, "signet");
         assert_eq!(info.height, 318737);
+    }
+
+    #[test]
+    fn a_web_page_in_place_of_json_gives_a_readable_error() {
+        let html = format!("<!DOCTYPE html><html>{}</html>", "x".repeat(5000));
+        let error = parse_tweaks(&html).unwrap_err().to_string();
+        assert!(
+            error.chars().count() < 200,
+            "a whole page must not reach the terminal: {error}"
+        );
+        assert!(error.contains("DOCTYPE"), "but it should still be shown");
     }
 
     #[test]

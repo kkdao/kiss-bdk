@@ -153,3 +153,67 @@ fn faucet_rejects_amounts_the_mutinynet_api_would_refuse() {
     assert!(!ok, "faucet accepted more than the API maximum");
     assert!(stderr.contains("1000000"), "{stderr}");
 }
+
+/// KISS's scan-key export for throwaway keys (scan `0x11`×32, spend `0x22`×32),
+/// in the `sp([origin]tspscan1…)` shape `kiss_session_sp_scan_export` prints.
+const SCAN_EXPORT: &str = "sp([73c5da0a/352h/1h/0h]tspscan1qzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsy3nd0l9w2cl9evy6p5v8pw6cqdzgq3shs7dpf9yu7g3gtud6u0e8sykkkg)";
+
+/// The silent payment code those keys receive on.
+const SCAN_EXPORT_CODE: &str = "tsp1qqd8n2k7uklxq4aegau7vawtptkgxsja4kt99lpv6krctwpq8tpc65qjxd4lu4etruh9sngx3su9mtqp5fqzxz7re59y5nnez9p03ht3lyudgq8ux";
+
+#[test]
+fn pairing_a_scan_key_yields_the_address_it_receives_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    init_watch_only(&wallet_dir, "signet");
+
+    let (ok, stdout, stderr) = run(&wallet_dir, &["sp-pair", "--key", SCAN_EXPORT]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains(SCAN_EXPORT_CODE), "{stdout}");
+    // Importing a private key must say so rather than leave it to the docs.
+    assert!(stdout.contains("scan private key"), "{stdout}");
+
+    // The address must survive the round trip through storage unchanged.
+    let (ok, stdout, stderr) = run(&wallet_dir, &["sp-address"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains(SCAN_EXPORT_CODE), "{stdout}");
+}
+
+#[test]
+fn an_unpaired_wallet_says_what_to_run_rather_than_failing_obscurely() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    init_watch_only(&wallet_dir, "signet");
+
+    for command in [vec!["sp-address"], vec!["sp-scan"]] {
+        let (ok, _, stderr) = run(&wallet_dir, &command);
+        assert!(!ok, "{command:?} should fail without keys");
+        assert!(stderr.contains("sp-pair"), "{command:?}: {stderr}");
+    }
+}
+
+#[test]
+fn a_chain_with_no_known_oracle_refuses_rather_than_guessing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    init_watch_only(&wallet_dir, "testnet4");
+    run(&wallet_dir, &["sp-pair", "--key", SCAN_EXPORT]);
+
+    // Signet's oracle would answer confidently about heights that mean nothing
+    // on another chain, so there is deliberately no shared default.
+    let (ok, _, stderr) = run(&wallet_dir, &["sp-scan"]);
+    assert!(!ok, "testnet4 has no tweak oracle");
+    assert!(stderr.contains("--blindbit"), "{stderr}");
+}
+
+#[test]
+fn sp_balance_reports_an_empty_wallet_without_a_scan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    init_watch_only(&wallet_dir, "signet");
+
+    let (ok, stdout, stderr) = run(&wallet_dir, &["sp-balance"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("never"), "{stdout}");
+    assert!(stdout.contains("silent payment total: 0 sats"), "{stdout}");
+}

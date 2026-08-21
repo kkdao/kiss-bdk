@@ -18,6 +18,7 @@ pub mod sp;
 pub mod spreceive;
 pub mod spscan;
 pub mod spsend;
+pub mod spstore;
 pub mod spverify;
 
 /// Split the two-path descriptor emitted by KISS (`/<0;1>/*`) into the

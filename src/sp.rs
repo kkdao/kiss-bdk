@@ -1,8 +1,9 @@
 //! BIP-352 silent payment addresses.
 //!
 //! Only the sending half lives here: decoding a recipient's `sp1`/`tsp1`
-//! address into the two public keys BIP-375 carries in a PSBT. Receiving needs
-//! whole-block tweak scanning, which the Esplora backend cannot serve.
+//! address into the two public keys BIP-375 carries in a PSBT. The receiving
+//! half is in `spreceive`, `spscan` and `blindbit`, because finding a payment
+//! needs per-block tweak data Esplora does not publish.
 //!
 //! KISS's own encoder (`main/kiss_sp.c`) is the reference this must agree with:
 //! bech32m, a version group that must be zero, and a 66-byte payload of two
