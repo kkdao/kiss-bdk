@@ -63,6 +63,31 @@ pub fn scan_descriptor(camera: u32) -> Result<String> {
     })
 }
 
+/// Scan KISS's silent payment scan-key export.
+///
+/// Separate from `scan_descriptor` rather than folded into it. That one only
+/// accepts the two-path wallet descriptor, so pointing it at this screen would
+/// scan forever; and widening it would let the wallet descriptor satisfy a
+/// scan-key import, which fails later and further from the cause.
+pub fn scan_scan_key(camera: u32) -> Result<String> {
+    scan_camera(camera, |payload| {
+        let export = payload.trim();
+        if looks_like_scan_key(export) {
+            Ok(Some(export.to_owned()))
+        } else {
+            Ok(None)
+        }
+    })
+}
+
+/// Accept the wrapped descriptor KISS prints and the bare key inside it.
+fn looks_like_scan_key(export: &str) -> bool {
+    let lower = export.to_ascii_lowercase();
+    // The mainnet prefix is recognised so the import can refuse it by name
+    // rather than leave the camera running on a QR it will never match.
+    lower.starts_with("sp([") || lower.starts_with("tspscan1") || lower.starts_with("spscan1")
+}
+
 /// Scan a KISS-signed PSBT from a static base64 or BC-UR `crypto-psbt` QR.
 pub fn scan_signed_psbt(camera: u32) -> Result<Psbt> {
     let raw = scan_signed_psbt_bytes(camera)?;
@@ -448,6 +473,27 @@ fn unwrap_cbor_byte_string(cbor: &[u8]) -> Result<&[u8]> {
 
 #[cfg(test)]
 mod tests {
+    use super::looks_like_scan_key;
+
+    #[test]
+    fn the_scan_key_filter_takes_kiss_export_and_not_the_wallet_descriptor() {
+        assert!(looks_like_scan_key(
+            "sp([73c5da0a/352h/1h/0h]tspscan1qqqq)"
+        ));
+        assert!(looks_like_scan_key("tspscan1qqqq"));
+        // Recognised so the import can name the problem rather than hang.
+        assert!(looks_like_scan_key("spscan1qqqq"));
+
+        // The wallet descriptor shares the screen flow but is a different key,
+        // and letting it through here is what sent a wpkh( string to a bech32
+        // parser on the first device test.
+        assert!(!looks_like_scan_key(
+            "wpkh([73c5da0a/84h/1h/0h]tpubDC8/<0;1>/*)"
+        ));
+        assert!(!looks_like_scan_key("tsp1qqveryaddressy"));
+        assert!(!looks_like_scan_key(""));
+    }
+
     use super::*;
     use bdk_wallet::bitcoin::{Transaction, absolute, transaction};
     use nokhwa::utils::Resolution;

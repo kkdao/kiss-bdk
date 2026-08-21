@@ -15,7 +15,7 @@ use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 use clap::{Parser, Subcommand, ValueEnum};
 use kiss_bdk::blindbit;
-use kiss_bdk::qr::{render_psbt_bytes_png, scan_descriptor, scan_signed_psbt_bytes};
+use kiss_bdk::qr::{render_psbt_bytes_png, scan_descriptor, scan_scan_key, scan_signed_psbt_bytes};
 use kiss_bdk::sp::{self, SilentPaymentAddress};
 use kiss_bdk::spreceive;
 use kiss_bdk::spscan;
@@ -512,7 +512,7 @@ fn sp_pair(wallet_dir: &Path, scan_qr: bool, key: Option<String>, camera: u32) -
     let export = match (scan_qr, key) {
         (true, _) => {
             println!("hold KISS's scan key QR in front of camera {camera}...");
-            scan_descriptor(camera)?
+            scan_scan_key(camera)?
         }
         (false, Some(key)) => key,
         (false, None) => bail!("pass --scan-qr to read KISS's export, or --key to paste it"),
@@ -821,10 +821,22 @@ fn create_psbt(
 
     let (mut connection, mut wallet) = open_wallet(wallet_dir, &config, chain)?;
     let mut builder = wallet.build_tx();
+    // Every input carries its full previous transaction, which is what lets the
+    // signer prove each input amount by hashing it back to its outpoint.
+    //
+    // Witness UTXOs alone are cheaper and were used here first, but a witness
+    // UTXO states an amount nothing commits to. With two or more inputs a
+    // coordinator can understate one and the difference becomes fee, invisible
+    // on the device and unrecoverable after signing -- so KISS refuses to sign
+    // that shape rather than warn about it. Attaching the previous transactions
+    // is BIP-174's own recommendation and what Core, Sparrow and Electrum send.
+    //
+    // It costs about 116 bytes per input, which the QR still carries; and if a
+    // transaction ever does outgrow the QR, `create` says so here rather than
+    // the device refusing it after the walk across the room.
     builder
         .add_recipient(recipient.script_pubkey(), Amount::from_sat(sats))
-        .fee_rate(fee_rate)
-        .only_witness_utxo();
+        .fee_rate(fee_rate);
     let psbt = builder.finish().context("building transaction")?;
     // A silent payment leaves as a PSBTv2: only the signer can derive the
     // output script, so v0's fixed unsigned transaction cannot carry it.
