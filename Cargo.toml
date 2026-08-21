@@ -12,6 +12,8 @@ anyhow = "1.0"
 base64 = "0.22"
 bdk_esplora = { version = "0.22.2", default-features = false, features = ["std", "blocking-https-rustls"] }
 bdk_wallet = { version = "3.1.0", features = ["rusqlite"] }
+# BIP-352 receive-side scanning; shares bdk_wallet's bitcoin 0.32.
+bdk_sp = { version = "0.2.0", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 minicbor = "2.2"

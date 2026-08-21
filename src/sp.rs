@@ -87,7 +87,7 @@ pub fn decode(address: &str) -> Result<SilentPaymentAddress> {
 
 /// Regroup 5-bit values into bytes, rejecting non-zero padding so two distinct
 /// strings can never decode to the same keys.
-fn from_base32(groups: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn from_base32(groups: &[u8]) -> Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(groups.len() * 5 / 8);
     let mut accumulator: u32 = 0;
     let mut bits: u32 = 0;
