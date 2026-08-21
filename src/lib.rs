@@ -10,11 +10,15 @@ use bdk_wallet::bitcoin::sighash::SighashCache;
 use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::miniscript::descriptor::{DescriptorPublicKey, checksum};
 
+pub mod blindbit;
 pub mod dleq;
 mod k_quirc;
 pub mod qr;
 pub mod sp;
+pub mod spreceive;
+pub mod spscan;
 pub mod spsend;
+pub mod spstore;
 pub mod spverify;
 
 /// Split the two-path descriptor emitted by KISS (`/<0;1>/*`) into the

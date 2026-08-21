@@ -153,6 +153,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bdk_sp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c401af00a119ceee1bd9aa35dd15c9130b5d8381003b141fb5456a938ab8efed"
+dependencies = [
+ "bitcoin",
+ "serde",
+]
+
+[[package]]
 name = "bdk_wallet"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -795,6 +805,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bdk_esplora",
+ "bdk_sp",
  "bdk_wallet",
  "cc",
  "clap",

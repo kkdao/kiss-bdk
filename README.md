@@ -32,6 +32,7 @@ The coordinator uses:
   SQLite persistence, balances, UTXOs, transaction building, and PSBT
   finalization.
 - `bdk_esplora` for chain scanning and transaction broadcasting over HTTPS.
+- `bdk_sp`, BDK's experimental silent payments crate, for BIP-352 receiving.
 
 BDK is the wallet engine, not the network server and not the signer.
 
@@ -96,8 +97,46 @@ show the payment reaches the address you typed.
 
 `inspect` reads either PSBT version and names the silent payment outputs.
 
-**Sending only.** Receiving requires scanning every block for tweak data, which
-the Esplora backend cannot serve.
+### Receiving
+
+Receiving needs the opposite of an address you can hand out and then watch for.
+Nothing on chain names the recipient, so a wallet has to test every block
+against its scan key, and the test needs the sum of each candidate
+transaction's input keys. Esplora will not publish that, and deriving it there
+means fetching every input of every transaction.
+
+So the scan reads the tweaks from a [BlindBit] server instead and matches them
+locally. The server learns which blocks are being scanned; it never learns which
+outputs matched, because the keys that decide that stay here.
+
+```sh
+kiss-bdk sp-pair --scan-qr     # import KISS's scan key
+kiss-bdk sp-address            # the tsp1... code to hand out
+kiss-bdk sp-scan               # search the chain for payments
+kiss-bdk sp-balance            # what was found
+```
+
+A tweak server only publishes for blocks it has indexed, so `sp-scan` cannot
+see a payment until it is mined — a wait of about ten minutes on signet. When
+the transaction is already known, `sp-scan --tx <txid>` derives the tweak here
+instead, from that transaction's own inputs, and finds the payment immediately
+whether or not it has been mined.
+
+`sp-pair` reads the QR from KISS's **SCAN KEY** export screen.
+That export carries the scan private key and not the spend key, which is the
+split BIP-352 is built around: this coordinator can see payments to the address
+and can never move them. It is also the first secret this wallet directory has
+ever held, so the command says so. Mainnet is not a network this CLI can be
+pointed at, so it can only ever be a testnet key.
+
+Signet is the only chain here with a published tweak server, the one BDK's own
+workshop uses. Point `--blindbit` at another to override it.
+
+**Found, not yet spendable.** Moving a received silent payment needs KISS to
+sign with its spend key plus the output's tweak, and without the usual taproot
+tweak — a signer change this coordinator cannot ask for yet.
+
+[BlindBit]: https://github.com/setavenger/blindbit-oracle
 
 ## Topping up
 

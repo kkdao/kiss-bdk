@@ -84,6 +84,12 @@ pub fn build_sp_psbt(
         let mut built = InputBuilder::new(&txin.previous_output)
             .segwit_fund(utxo)
             .build();
+        // The witness UTXO is what signing needs, but it states an amount
+        // nothing commits to. Carry the full previous transaction across too,
+        // so the signer can hash each amount back to its outpoint; dropping it
+        // here is what made silent payments the one path the signer still
+        // refused after `create` started attaching them.
+        built.non_witness_utxo = input.non_witness_utxo.clone();
         built.sequence = Some(txin.sequence);
         built.bip32_derivations = compressed_derivations(&input.bip32_derivation);
         // Sighash type is deliberately left unset: BIP-375 signing is
