@@ -112,9 +112,15 @@ outputs matched, because the keys that decide that stay here.
 ```sh
 kiss-bdk sp-pair --scan-qr     # import KISS's scan key
 kiss-bdk sp-address            # the tsp1... code to hand out
-kiss-bdk sp-scan               # search for payments
+kiss-bdk sp-scan               # search the chain for payments
 kiss-bdk sp-balance            # what was found
 ```
+
+A tweak server only publishes for blocks it has indexed, so `sp-scan` cannot
+see a payment until it is mined — a wait of about ten minutes on signet. When
+the transaction is already known, `sp-scan --tx <txid>` derives the tweak here
+instead, from that transaction's own inputs, and finds the payment immediately
+whether or not it has been mined.
 
 `sp-pair` reads the QR from KISS's **SCAN KEY** export screen.
 That export carries the scan private key and not the spend key, which is the
