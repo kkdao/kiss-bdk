@@ -5,7 +5,9 @@
 //! rather than merely being self-consistent.
 
 use bdk_wallet::bitcoin::secp256k1::PublicKey;
+use bdk_wallet::bitcoin::{CompressedPublicKey, OutPoint};
 use kiss_bdk::dleq;
+use kiss_bdk::sp::derive;
 use psbt_v2::v2::Psbt;
 
 const FIXTURE: &str = include_str!("fixtures/bip375-dleq.json");
@@ -61,4 +63,50 @@ fn accepts_the_proofs_in_the_valid_vectors() {
 #[test]
 fn rejects_the_deliberately_invalid_proof() {
     check("invalid", false);
+}
+
+#[test]
+fn rederives_the_output_scripts_in_the_valid_vectors() {
+    let fixture: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let mut checked = 0;
+    for item in fixture["valid"].as_array().unwrap() {
+        let description = item["description"].as_str().unwrap();
+        let psbt: Psbt = item["psbt"].as_str().unwrap().parse().unwrap();
+        let a_sum = input_key_sum(&psbt).unwrap();
+        let outpoints: Vec<OutPoint> = psbt
+            .inputs
+            .iter()
+            .map(|input| OutPoint {
+                txid: input.previous_txid,
+                vout: input.spent_output_index,
+            })
+            .collect();
+        let input_hash = derive::input_hash(&outpoints, &a_sum).unwrap();
+
+        // Recipients sharing a scan key form a group; k is the position within it.
+        let mut seen: Vec<PublicKey> = Vec::new();
+        for output in &psbt.outputs {
+            let Some(info) = &output.sp_v0_info else {
+                continue;
+            };
+            let scan = PublicKey::from_slice(&info[..33]).unwrap();
+            let spend = PublicKey::from_slice(&info[33..]).unwrap();
+            let k = seen.iter().filter(|other| **other == scan).count() as u32;
+            seen.push(scan);
+
+            let Some(share) = psbt.global.sp_ecdh_shares.get(&CompressedPublicKey(scan)) else {
+                continue;
+            };
+            if output.script_pubkey.is_empty() {
+                continue; // not yet derived by a signer
+            }
+            let derived = derive::output_script(&share.0, &spend, &input_hash, k).unwrap();
+            assert_eq!(
+                derived, output.script_pubkey,
+                "re-derived script disagrees with the vector: {description}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no output scripts were re-derived");
 }

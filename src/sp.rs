@@ -145,3 +145,74 @@ mod tests {
         assert!(!looks_like_silent_payment("spam"));
     }
 }
+
+/// Re-derive the taproot output a silent payment must pay to.
+///
+/// Verifying the signer's DLEQ proof shows the ECDH share is honest; this then
+/// shows the share actually produces the script the signer filled in. Together
+/// they let the coordinator prove the money goes to the address the user asked
+/// for, rather than taking the signer's word for it.
+///
+/// `main/kiss_sp.c` (`sp_input_hash`, `sp_derive_group`) is the reference.
+pub mod derive {
+    use anyhow::{Context, Result};
+    use bdk_wallet::bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
+    use bdk_wallet::bitcoin::{OutPoint, ScriptBuf};
+
+    use bdk_wallet::bitcoin::hashes::Hash;
+
+    use crate::dleq::tagged_hash;
+
+    /// BIP-352 input hash, binding the payment to this exact set of inputs.
+    pub fn input_hash(outpoints: &[OutPoint], a_sum: &PublicKey) -> Result<[u8; 32]> {
+        let mut serialized: Vec<[u8; 36]> = outpoints
+            .iter()
+            .map(|outpoint| {
+                let mut bytes = [0_u8; 36];
+                bytes[..32].copy_from_slice(&outpoint.txid.to_raw_hash().to_byte_array());
+                bytes[32..].copy_from_slice(&outpoint.vout.to_le_bytes());
+                bytes
+            })
+            .collect();
+        serialized.sort_unstable();
+        let lowest = serialized.first().context("no inputs to hash")?;
+
+        let mut message = Vec::with_capacity(36 + 33);
+        message.extend_from_slice(lowest);
+        message.extend_from_slice(&a_sum.serialize());
+        Ok(tagged_hash("BIP0352/Inputs", &message))
+    }
+
+    /// The P2TR script for recipient `k` within a scan-key group.
+    pub fn output_script(
+        share: &PublicKey,
+        spend: &PublicKey,
+        input_hash: &[u8; 32],
+        k: u32,
+    ) -> Result<ScriptBuf> {
+        let secp = Secp256k1::new();
+        let scalar = SecretKey::from_slice(input_hash).context("input hash is out of range")?;
+        let adjusted = share
+            .mul_tweak(&secp, &Scalar::from(scalar))
+            .context("adjusting the ECDH share left the curve")?;
+
+        let mut message = Vec::with_capacity(37);
+        message.extend_from_slice(&adjusted.serialize());
+        message.extend_from_slice(&k.to_be_bytes());
+        let tweak = tagged_hash("BIP0352/SharedSecret", &message);
+
+        let output = spend
+            .add_exp_tweak(
+                &secp,
+                &Scalar::from_be_bytes(tweak).context("shared secret is out of range")?,
+            )
+            .context("deriving the silent payment output left the curve")?;
+
+        let (xonly, _) = output.x_only_public_key();
+        let mut script = Vec::with_capacity(34);
+        script.push(0x51); // OP_1
+        script.push(0x20); // 32-byte witness program
+        script.extend_from_slice(&xonly.serialize());
+        Ok(ScriptBuf::from_bytes(script))
+    }
+}

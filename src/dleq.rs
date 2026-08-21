@@ -80,7 +80,7 @@ fn challenge_hash(
 }
 
 /// BIP-340 style tagged hash: `sha256(sha256(tag) || sha256(tag) || message)`.
-fn tagged_hash(tag: &str, message: &[u8]) -> [u8; 32] {
+pub(crate) fn tagged_hash(tag: &str, message: &[u8]) -> [u8; 32] {
     let tag_hash = sha256::Hash::hash(tag.as_bytes());
     let mut engine = Vec::with_capacity(64 + message.len());
     engine.extend_from_slice(tag_hash.as_byte_array());
