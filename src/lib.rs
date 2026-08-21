@@ -10,6 +10,7 @@ use bdk_wallet::bitcoin::sighash::SighashCache;
 use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::miniscript::descriptor::{DescriptorPublicKey, checksum};
 
+pub mod dleq;
 mod k_quirc;
 pub mod qr;
 pub mod sp;
