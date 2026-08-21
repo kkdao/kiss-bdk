@@ -64,6 +64,41 @@ one of them and neither this CLI nor KISS can tell them apart. Keep one
 `--wallet-dir` per network; a wallet directory is pinned to the network it was
 created on, and `init` refuses to overwrite an existing one.
 
+## Silent payments
+
+Send to a BIP-352 address by passing it to `create`:
+
+```sh
+kiss-bdk create --to tsp1… --sats 10000 --qr
+```
+
+A silent payment output script is derived from the *input private keys*, so a
+watch-only wallet cannot compute it. BIP-375 carries the recipient's scan and
+spend keys in the PSBT and lets KISS fill the script in, which is why these
+transactions leave as a PSBTv2 — a v0 PSBT cannot express an output whose script
+is not yet known.
+
+BDK still does all the wallet work: it selects coins and computes change and the
+fee against a taproot placeholder of exactly the size the real output will be.
+
+A PSBTv2 is bigger than the v0 it replaces, and the unsigned QR is a single
+static frame, so `--qr` runs out of room sooner than the 16 inputs KISS itself
+allows: past roughly three inputs `create` stops rather than emit a QR the
+camera cannot read. Funding a demo wallet with one or two large UTXOs rather
+than many small ones keeps well clear of that.
+
+Nothing about that output is taken on trust. Before broadcasting, `scan` and
+`broadcast` check three things: that KISS returned the same transaction it was
+given apart from the scripts it was asked to fill in, that its BIP-374 DLEQ
+proof shows the ECDH share came from these inputs, and that re-deriving the
+output from that share reproduces the script KISS wrote. Only all three together
+show the payment reaches the address you typed.
+
+`inspect` reads either PSBT version and names the silent payment outputs.
+
+**Sending only.** Receiving requires scanning every block for tweak data, which
+the Esplora backend cannot serve.
+
 ## Topping up
 
 ```sh
@@ -152,4 +187,15 @@ transaction, verifies the ECDSA signatures, and asks BDK to finalize it before b
 The full physical flow produced this accepted Testnet4 transaction:
 
 [8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659](https://mempool.space/testnet4/tx/8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659)
+
+The silent payment flow ran over the same hardware on Signet. KISS accepted the
+BIP-375 PSBTv2, derived the output script, and returned it with a DLEQ proof;
+the coordinator verified the proof, re-derived the script, and broadcast:
+
+[3a6801e9b5a7398406621299aefc8a2c915d20de612f21a26011972aa90cd12a](https://mempool.space/signet/tx/3a6801e9b5a7398406621299aefc8a2c915d20de612f21a26011972aa90cd12a)
+
+Its 10,000 sat output pays a `tsp1` address whose scan and spend keys are
+throwaway test values, so the payment can be checked from the receiving side
+too: deriving from that scan key reproduces the broadcast output script
+`tb1p74frpnrdrq2mt09xdnrje0ewvctp4g2wzra0a8xpdmuc3lhuafast97k48`.
 

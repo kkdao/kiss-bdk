@@ -14,9 +14,12 @@ use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 use clap::{Parser, Subcommand, ValueEnum};
-use kiss_bdk::qr::{render_psbt_png, scan_descriptor, scan_signed_psbt};
+use kiss_bdk::qr::{render_psbt_bytes_png, scan_descriptor, scan_signed_psbt_bytes};
+use kiss_bdk::sp::{self, SilentPaymentAddress};
+use kiss_bdk::spsend::{self, AnyPsbt};
+use kiss_bdk::spverify;
 use kiss_bdk::{
-    read_psbt, split_kiss_descriptor, verify_psbt_ecdsa_signatures, write_new_file, write_psbt,
+    read_psbt_bytes, split_kiss_descriptor, verify_psbt_ecdsa_signatures, write_new_file,
 };
 use serde::{Deserialize, Serialize};
 
@@ -598,21 +601,26 @@ fn create_psbt(
         );
     }
     let (config, chain) = load_config(wallet_dir)?;
-    let unchecked = Address::<NetworkUnchecked>::from_str(destination)
-        .context("invalid destination address")?;
-    let address = unchecked
-        .require_network(chain.network())
-        .with_context(|| format!("destination is not valid for {}", chain.label()))?;
+    let recipient = parse_destination(destination, chain)?;
     let fee_rate = FeeRate::from_sat_per_vb(fee_rate).context("fee rate is too large")?;
 
     let (mut connection, mut wallet) = open_wallet(wallet_dir, &config, chain)?;
     let mut builder = wallet.build_tx();
     builder
-        .add_recipient(address.script_pubkey(), Amount::from_sat(sats))
+        .add_recipient(recipient.script_pubkey(), Amount::from_sat(sats))
         .fee_rate(fee_rate)
         .only_witness_utxo();
     let psbt = builder.finish().context("building transaction")?;
-    let psbt_size = psbt.serialize().len();
+    // A silent payment leaves as a PSBTv2: only the signer can derive the
+    // output script, so v0's fixed unsigned transaction cannot carry it.
+    let serialized = match &recipient {
+        Destination::Address(_) => psbt.serialize(),
+        Destination::SilentPayment(sp) => {
+            let index = spsend::placeholder_index(&psbt, sp)?;
+            spsend::build_sp_psbt(&psbt, index, sp)?
+        }
+    };
+    let psbt_size = serialized.len();
     if psbt.inputs.len() > KISS_MAX_INPUTS {
         bail!(
             "transaction has {} inputs; KISS supports at most {KISS_MAX_INPUTS}",
@@ -639,10 +647,10 @@ fn create_psbt(
             "KISS-signed PSBT may grow to {estimated_signed_size} bytes; its signing buffer holds at most {KISS_MAX_SIGNED_PSBT_BYTES}"
         );
     }
-    let qr_png = qr.then(|| render_psbt_png(&psbt)).transpose()?;
+    let qr_png = qr.then(|| render_psbt_bytes_png(&serialized)).transpose()?;
     // finish() reserves a change address; persist before handing the PSBT out.
     wallet.persist(&mut connection)?;
-    write_psbt(out, &psbt)?;
+    write_new_file(out, &serialized)?;
     if let (Some(path), Some(png)) = (&qr_path, qr_png) {
         write_new_file(path, &png)?;
     }
@@ -650,6 +658,9 @@ fn create_psbt(
     let fee = wallet.calculate_fee(&psbt.unsigned_tx)?;
     println!("wrote {}", out.display());
     println!("network: {}", chain.label());
+    if let Destination::SilentPayment(_) = recipient {
+        println!("silent payment: BIP-375 PSBTv2; KISS derives the output script");
+    }
     println!("send: {} sats", sats);
     println!("fee: {} sats", fee.to_sat());
     println!("PSBT size: {psbt_size} bytes");
@@ -671,6 +682,45 @@ fn create_psbt(
         );
     }
     Ok(())
+}
+
+/// Where a `create` is being sent.
+enum Destination {
+    Address(Address),
+    SilentPayment(SilentPaymentAddress),
+}
+
+impl Destination {
+    /// The script BDK selects coins and computes the fee against. A silent
+    /// payment's real script is not known until signing, so this is a taproot
+    /// placeholder of exactly the size the real one will be.
+    fn script_pubkey(&self) -> bdk_wallet::bitcoin::ScriptBuf {
+        match self {
+            Destination::Address(address) => address.script_pubkey(),
+            Destination::SilentPayment(sp) => spsend::placeholder_script(sp),
+        }
+    }
+}
+
+fn parse_destination(destination: &str, chain: Chain) -> Result<Destination> {
+    if sp::looks_like_silent_payment(destination) {
+        let recipient = sp::decode(destination)?;
+        // Every chain this coordinator speaks is a test network, so a mainnet
+        // `sp1` address is always the wrong one.
+        if recipient.mainnet {
+            bail!(
+                "that is a mainnet silent payment address; this wallet is on {}",
+                chain.label()
+            );
+        }
+        return Ok(Destination::SilentPayment(recipient));
+    }
+    let unchecked = Address::<NetworkUnchecked>::from_str(destination)
+        .context("invalid destination address")?;
+    let address = unchecked
+        .require_network(chain.network())
+        .with_context(|| format!("destination is not valid for {}", chain.label()))?;
+    Ok(Destination::Address(address))
 }
 
 fn qr_image_path(psbt_path: &Path) -> PathBuf {
@@ -700,16 +750,30 @@ fn scan_psbt(wallet_dir: &Path, out: &Path, original_path: &Path, camera: u32) -
     if out.exists() {
         bail!("{} already exists; refusing to overwrite it", out.display());
     }
-    let original = read_psbt(original_path)?;
+    let original = AnyPsbt::parse(&read_psbt_bytes(original_path)?)?;
     println!("Hold KISS's animated signed QR in front of camera {camera}...");
-    let psbt = scan_signed_psbt(camera)?;
-    if psbt.unsigned_tx != original.unsigned_tx {
-        bail!(
-            "scanned signed PSBT does not match {}",
+    let scanned = scan_signed_psbt_bytes(camera)?;
+    match (&original, AnyPsbt::parse(&scanned)?) {
+        (AnyPsbt::V0(original), AnyPsbt::V0(psbt)) => {
+            if psbt.unsigned_tx != original.unsigned_tx {
+                bail!(
+                    "scanned signed PSBT does not match {}",
+                    original_path.display()
+                );
+            }
+        }
+        (AnyPsbt::V2(original), AnyPsbt::V2(psbt)) => {
+            // A silent payment signer is expected to change the output scripts;
+            // verify() allows exactly that and nothing else.
+            let verified = spverify::verify(original, &psbt)?;
+            println!("silent payment outputs verified: {}", verified.len());
+        }
+        _ => bail!(
+            "the scanned PSBT is a different version from {}",
             original_path.display()
-        );
+        ),
     }
-    write_psbt(out, &psbt)?;
+    write_new_file(out, &scanned)?;
     println!("wrote {}", out.display());
     println!(
         "next: kiss-bdk --wallet-dir {} broadcast {} --original {} --dry-run",
@@ -721,7 +785,30 @@ fn scan_psbt(wallet_dir: &Path, out: &Path, original_path: &Path, camera: u32) -
 }
 
 fn inspect_psbt(path: &Path) -> Result<()> {
-    let psbt = read_psbt(path)?;
+    let psbt = match AnyPsbt::parse(&read_psbt_bytes(path)?)? {
+        AnyPsbt::V0(psbt) => psbt,
+        AnyPsbt::V2(v2) => {
+            // Report the silent payment recipients before flattening to v0,
+            // because that is the part a v0 view cannot show.
+            println!("version: PSBTv2 (BIP-375 silent payment)");
+            for (index, output) in v2.outputs.iter().enumerate() {
+                if output.sp_v0_info.is_some() {
+                    let state = if output.script_pubkey.is_empty() {
+                        "awaiting the signer's derivation"
+                    } else {
+                        "derived by the signer"
+                    };
+                    println!("output {index}: silent payment, {state}");
+                }
+            }
+            println!(
+                "ECDH shares: {}, DLEQ proofs: {}",
+                v2.global.sp_ecdh_shares.len(),
+                v2.global.sp_dleq_proofs.len()
+            );
+            spsend::to_v0(&v2)?
+        }
+    };
     println!("inputs: {}", psbt.inputs.len());
     println!("outputs: {}", psbt.outputs.len());
     // Every Bitcoin test network shares one address HRP, so this renders the same
@@ -744,10 +831,30 @@ fn inspect_psbt(path: &Path) -> Result<()> {
 fn broadcast(wallet_dir: &Path, path: &Path, original_path: &Path, dry_run: bool) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
     let (_connection, wallet) = open_wallet(wallet_dir, &config, chain)?;
-    let signed = read_psbt(path)?;
-    let mut psbt = read_psbt(original_path)?;
-    psbt.combine(signed)
-        .context("signed PSBT does not match the original transaction")?;
+    let signed = AnyPsbt::parse(&read_psbt_bytes(path)?)?;
+    let original = AnyPsbt::parse(&read_psbt_bytes(original_path)?)?;
+
+    let mut psbt = match (original, signed) {
+        (AnyPsbt::V0(mut original), AnyPsbt::V0(signed)) => {
+            original
+                .combine(signed)
+                .context("signed PSBT does not match the original transaction")?;
+            original
+        }
+        (AnyPsbt::V2(original), AnyPsbt::V2(signed)) => {
+            // The coordinator cannot build a silent payment output, so instead
+            // of trusting the one it got back it proves the signer derived it
+            // from these inputs and that it pays the intended address.
+            for output in spverify::verify(&original, &signed)? {
+                println!("silent payment output {} verified", output.index);
+            }
+            println!("BIP-374 DLEQ proof: verified");
+            // Every script is known now, so the rest of the path is unchanged.
+            spsend::to_v0(&signed)?
+        }
+        _ => bail!("the signed PSBT is a different version from the original"),
+    };
+
     for txin in &psbt.unsigned_tx.input {
         if wallet.get_utxo(txin.previous_output).is_none() {
             bail!(

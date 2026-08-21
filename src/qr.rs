@@ -37,7 +37,13 @@ const CRYPTO_PSBT_PREFIX: &str = "ur:crypto-psbt/";
 
 /// Render a PSBT as one static, base64 QR in a PNG image.
 pub fn render_psbt_png(psbt: &Psbt) -> Result<Vec<u8>> {
-    let payload = base64::engine::general_purpose::STANDARD.encode(psbt.serialize());
+    render_psbt_bytes_png(&psbt.serialize())
+}
+
+/// Render an already-serialized PSBT. The BIP-375 path builds its own PSBTv2
+/// bytes, which rust-bitcoin's v0 `Psbt` cannot represent.
+pub fn render_psbt_bytes_png(psbt: &[u8]) -> Result<Vec<u8>> {
+    let payload = base64::engine::general_purpose::STANDARD.encode(psbt);
     render_payload_png(&payload)
 }
 
@@ -59,13 +65,25 @@ pub fn scan_descriptor(camera: u32) -> Result<String> {
 
 /// Scan a KISS-signed PSBT from a static base64 or BC-UR `crypto-psbt` QR.
 pub fn scan_signed_psbt(camera: u32) -> Result<Psbt> {
+    let raw = scan_signed_psbt_bytes(camera)?;
+    Psbt::deserialize(&raw).context("parsing scanned signed PSBT")
+}
+
+/// Scan a signed PSBT without parsing it.
+///
+/// A silent payment comes back as a PSBTv2, which rust-bitcoin's `Psbt` cannot
+/// represent, so the caller decides how to read the bytes.
+pub fn scan_signed_psbt_bytes(camera: u32) -> Result<Vec<u8>> {
     let mut decoder = SignedPsbtDecoder::default();
     scan_camera(camera, move |payload| {
         receive_camera_payload(&mut decoder, payload)
     })
 }
 
-fn receive_camera_payload(decoder: &mut SignedPsbtDecoder, payload: &str) -> Result<Option<Psbt>> {
+fn receive_camera_payload(
+    decoder: &mut SignedPsbtDecoder,
+    payload: &str,
+) -> Result<Option<Vec<u8>>> {
     match decoder.receive(payload) {
         Ok(value) => Ok(value),
         Err(error) if error.downcast_ref::<SafetyViolation>().is_some() => Err(error),
@@ -235,7 +253,7 @@ fn safety_violation(message: impl Into<String>) -> anyhow::Error {
 }
 
 impl SignedPsbtDecoder {
-    fn receive(&mut self, payload: &str) -> Result<Option<Psbt>> {
+    fn receive(&mut self, payload: &str) -> Result<Option<Vec<u8>>> {
         let payload = payload.trim();
         if payload.starts_with("cHNidP") {
             if payload.len() > MAX_STATIC_BASE64_BYTES {
@@ -341,12 +359,14 @@ fn validate_fountain_part(cbor: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn parse_crypto_psbt_cbor(cbor: &[u8]) -> Result<Psbt> {
+fn parse_crypto_psbt_cbor(cbor: &[u8]) -> Result<Vec<u8>> {
     let raw = unwrap_cbor_byte_string(cbor).context("crypto-psbt must be one CBOR byte string")?;
     parse_raw_psbt(raw)
 }
 
-fn parse_raw_psbt(raw: &[u8]) -> Result<Psbt> {
+/// Check a scanned payload really is a PSBT of a size KISS could have produced.
+/// Parsing is left to the caller, which knows whether to expect v0 or v2.
+fn parse_raw_psbt(raw: &[u8]) -> Result<Vec<u8>> {
     if raw.len() > MAX_PSBT_BYTES {
         bail!(
             "signed PSBT is {} bytes; KISS supports at most {MAX_PSBT_BYTES}",
@@ -356,7 +376,7 @@ fn parse_raw_psbt(raw: &[u8]) -> Result<Psbt> {
     if !raw.starts_with(b"psbt\xff") {
         bail!("scanned payload does not contain PSBT magic bytes");
     }
-    Psbt::deserialize(raw).context("parsing scanned signed PSBT")
+    Ok(raw.to_vec())
 }
 
 fn unwrap_cbor_byte_string(cbor: &[u8]) -> Result<&[u8]> {
@@ -645,7 +665,7 @@ mod tests {
         let decoded = receive_camera_payload(&mut decoder, &encoded)
             .unwrap()
             .unwrap();
-        assert_eq!(decoded.serialize(), expected.serialize());
+        assert_eq!(decoded, expected.serialize());
     }
 
     #[test]
@@ -668,7 +688,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(decoded.unwrap().serialize(), expected.serialize());
+        assert_eq!(decoded.unwrap(), expected.serialize());
     }
 
     #[test]
@@ -686,7 +706,7 @@ mod tests {
                 .iter()
                 .find_map(|part| decoder.receive(part).unwrap())
                 .unwrap();
-            assert_eq!(decoded.serialize(), expected);
+            assert_eq!(decoded, expected);
         }
     }
 
@@ -696,7 +716,7 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(expected.serialize());
         let mut decoder = SignedPsbtDecoder::default();
         let decoded = decoder.receive(&encoded).unwrap().unwrap();
-        assert_eq!(decoded.serialize(), expected.serialize());
+        assert_eq!(decoded, expected.serialize());
 
         let mut oversized_raw = vec![0_u8; MAX_PSBT_BYTES + 1];
         oversized_raw[..5].copy_from_slice(b"psbt\xff");

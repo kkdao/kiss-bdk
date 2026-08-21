@@ -10,8 +10,12 @@ use bdk_wallet::bitcoin::sighash::SighashCache;
 use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::miniscript::descriptor::{DescriptorPublicKey, checksum};
 
+pub mod dleq;
 mod k_quirc;
 pub mod qr;
+pub mod sp;
+pub mod spsend;
+pub mod spverify;
 
 /// Split the two-path descriptor emitted by KISS (`/<0;1>/*`) into the
 /// external and internal descriptors expected by BDK.
@@ -98,18 +102,24 @@ pub fn split_kiss_descriptor(descriptor: &str) -> Result<(String, String)> {
 
 /// Read either the binary PSBT written by KISS or a base64 text PSBT.
 pub fn read_psbt(path: &Path) -> Result<Psbt> {
+    Psbt::deserialize(&read_psbt_bytes(path)?).context("parsing PSBT")
+}
+
+/// The raw bytes of a PSBT file, whether binary or base64 text.
+///
+/// A silent payment round trip is a PSBTv2, which rust-bitcoin's `Psbt` cannot
+/// represent, so the caller decides how to parse what comes back.
+pub fn read_psbt_bytes(path: &Path) -> Result<Vec<u8>> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let raw = if bytes.starts_with(b"psbt\xff") {
-        bytes
-    } else {
-        let text =
-            std::str::from_utf8(&bytes).context("PSBT is neither binary nor UTF-8 base64 text")?;
-        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-        base64::engine::general_purpose::STANDARD
-            .decode(compact)
-            .context("decoding base64 PSBT")?
-    };
-    Psbt::deserialize(&raw).context("parsing PSBT")
+    if bytes.starts_with(b"psbt\xff") {
+        return Ok(bytes);
+    }
+    let text =
+        std::str::from_utf8(&bytes).context("PSBT is neither binary nor UTF-8 base64 text")?;
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(compact)
+        .context("decoding base64 PSBT")
 }
 
 pub fn write_psbt(path: &Path, psbt: &Psbt) -> Result<()> {
