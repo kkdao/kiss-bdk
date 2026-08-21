@@ -37,7 +37,13 @@ const CRYPTO_PSBT_PREFIX: &str = "ur:crypto-psbt/";
 
 /// Render a PSBT as one static, base64 QR in a PNG image.
 pub fn render_psbt_png(psbt: &Psbt) -> Result<Vec<u8>> {
-    let payload = base64::engine::general_purpose::STANDARD.encode(psbt.serialize());
+    render_psbt_bytes_png(&psbt.serialize())
+}
+
+/// Render an already-serialized PSBT. The BIP-375 path builds its own PSBTv2
+/// bytes, which rust-bitcoin's v0 `Psbt` cannot represent.
+pub fn render_psbt_bytes_png(psbt: &[u8]) -> Result<Vec<u8>> {
+    let payload = base64::engine::general_purpose::STANDARD.encode(psbt);
     render_payload_png(&payload)
 }
 

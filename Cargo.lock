@@ -803,6 +803,7 @@ dependencies = [
  "minreq",
  "nokhwa",
  "nokhwa-bindings-macos",
+ "psbt-v2",
  "qrcode",
  "serde",
  "serde_json",
@@ -1151,6 +1152,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "psbt-v2"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e075616cae99e29d70960a6374c2757dff4dd6b646dd0398ce1012666231c7aa"
+dependencies = [
+ "bitcoin",
+ "miniscript",
 ]
 
 [[package]]

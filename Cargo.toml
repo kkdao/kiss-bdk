@@ -17,6 +17,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 minicbor = "2.2"
 # Already in the tree via bdk_esplora's blocking backend; reused for faucet calls.
 minreq = { version = "2.14", features = ["https-rustls"] }
+# BIP-375 silent payment PSBT fields; shares bdk_wallet's bitcoin 0.32.
+psbt-v2 = { version = "=0.3.0", features = ["silent-payments", "base64", "std"] }
 nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 serde = { version = "1.0", features = ["derive"] }

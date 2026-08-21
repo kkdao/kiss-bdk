@@ -14,7 +14,9 @@ use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 use clap::{Parser, Subcommand, ValueEnum};
-use kiss_bdk::qr::{render_psbt_png, scan_descriptor, scan_signed_psbt};
+use kiss_bdk::qr::{render_psbt_bytes_png, scan_descriptor, scan_signed_psbt};
+use kiss_bdk::sp::{self, SilentPaymentAddress};
+use kiss_bdk::spsend;
 use kiss_bdk::{
     read_psbt, split_kiss_descriptor, verify_psbt_ecdsa_signatures, write_new_file, write_psbt,
 };
@@ -598,21 +600,26 @@ fn create_psbt(
         );
     }
     let (config, chain) = load_config(wallet_dir)?;
-    let unchecked = Address::<NetworkUnchecked>::from_str(destination)
-        .context("invalid destination address")?;
-    let address = unchecked
-        .require_network(chain.network())
-        .with_context(|| format!("destination is not valid for {}", chain.label()))?;
+    let recipient = parse_destination(destination, chain)?;
     let fee_rate = FeeRate::from_sat_per_vb(fee_rate).context("fee rate is too large")?;
 
     let (mut connection, mut wallet) = open_wallet(wallet_dir, &config, chain)?;
     let mut builder = wallet.build_tx();
     builder
-        .add_recipient(address.script_pubkey(), Amount::from_sat(sats))
+        .add_recipient(recipient.script_pubkey(), Amount::from_sat(sats))
         .fee_rate(fee_rate)
         .only_witness_utxo();
     let psbt = builder.finish().context("building transaction")?;
-    let psbt_size = psbt.serialize().len();
+    // A silent payment leaves as a PSBTv2: only the signer can derive the
+    // output script, so v0's fixed unsigned transaction cannot carry it.
+    let serialized = match &recipient {
+        Destination::Address(_) => psbt.serialize(),
+        Destination::SilentPayment(sp) => {
+            let index = spsend::placeholder_index(&psbt, sp)?;
+            spsend::build_sp_psbt(&psbt, index, sp)?
+        }
+    };
+    let psbt_size = serialized.len();
     if psbt.inputs.len() > KISS_MAX_INPUTS {
         bail!(
             "transaction has {} inputs; KISS supports at most {KISS_MAX_INPUTS}",
@@ -639,10 +646,10 @@ fn create_psbt(
             "KISS-signed PSBT may grow to {estimated_signed_size} bytes; its signing buffer holds at most {KISS_MAX_SIGNED_PSBT_BYTES}"
         );
     }
-    let qr_png = qr.then(|| render_psbt_png(&psbt)).transpose()?;
+    let qr_png = qr.then(|| render_psbt_bytes_png(&serialized)).transpose()?;
     // finish() reserves a change address; persist before handing the PSBT out.
     wallet.persist(&mut connection)?;
-    write_psbt(out, &psbt)?;
+    write_new_file(out, &serialized)?;
     if let (Some(path), Some(png)) = (&qr_path, qr_png) {
         write_new_file(path, &png)?;
     }
@@ -650,6 +657,9 @@ fn create_psbt(
     let fee = wallet.calculate_fee(&psbt.unsigned_tx)?;
     println!("wrote {}", out.display());
     println!("network: {}", chain.label());
+    if let Destination::SilentPayment(_) = recipient {
+        println!("silent payment: BIP-375 PSBTv2; KISS derives the output script");
+    }
     println!("send: {} sats", sats);
     println!("fee: {} sats", fee.to_sat());
     println!("PSBT size: {psbt_size} bytes");
@@ -671,6 +681,45 @@ fn create_psbt(
         );
     }
     Ok(())
+}
+
+/// Where a `create` is being sent.
+enum Destination {
+    Address(Address),
+    SilentPayment(SilentPaymentAddress),
+}
+
+impl Destination {
+    /// The script BDK selects coins and computes the fee against. A silent
+    /// payment's real script is not known until signing, so this is a taproot
+    /// placeholder of exactly the size the real one will be.
+    fn script_pubkey(&self) -> bdk_wallet::bitcoin::ScriptBuf {
+        match self {
+            Destination::Address(address) => address.script_pubkey(),
+            Destination::SilentPayment(sp) => spsend::placeholder_script(sp),
+        }
+    }
+}
+
+fn parse_destination(destination: &str, chain: Chain) -> Result<Destination> {
+    if sp::looks_like_silent_payment(destination) {
+        let recipient = sp::decode(destination)?;
+        // Every chain this coordinator speaks is a test network, so a mainnet
+        // `sp1` address is always the wrong one.
+        if recipient.mainnet {
+            bail!(
+                "that is a mainnet silent payment address; this wallet is on {}",
+                chain.label()
+            );
+        }
+        return Ok(Destination::SilentPayment(recipient));
+    }
+    let unchecked = Address::<NetworkUnchecked>::from_str(destination)
+        .context("invalid destination address")?;
+    let address = unchecked
+        .require_network(chain.network())
+        .with_context(|| format!("destination is not valid for {}", chain.label()))?;
+    Ok(Destination::Address(address))
 }
 
 fn qr_image_path(psbt_path: &Path) -> PathBuf {
