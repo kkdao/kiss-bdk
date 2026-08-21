@@ -14,11 +14,12 @@ use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 use clap::{Parser, Subcommand, ValueEnum};
-use kiss_bdk::qr::{render_psbt_bytes_png, scan_descriptor, scan_signed_psbt};
+use kiss_bdk::qr::{render_psbt_bytes_png, scan_descriptor, scan_signed_psbt_bytes};
 use kiss_bdk::sp::{self, SilentPaymentAddress};
-use kiss_bdk::spsend;
+use kiss_bdk::spsend::{self, AnyPsbt};
+use kiss_bdk::spverify;
 use kiss_bdk::{
-    read_psbt, split_kiss_descriptor, verify_psbt_ecdsa_signatures, write_new_file, write_psbt,
+    read_psbt_bytes, split_kiss_descriptor, verify_psbt_ecdsa_signatures, write_new_file,
 };
 use serde::{Deserialize, Serialize};
 
@@ -749,16 +750,30 @@ fn scan_psbt(wallet_dir: &Path, out: &Path, original_path: &Path, camera: u32) -
     if out.exists() {
         bail!("{} already exists; refusing to overwrite it", out.display());
     }
-    let original = read_psbt(original_path)?;
+    let original = AnyPsbt::parse(&read_psbt_bytes(original_path)?)?;
     println!("Hold KISS's animated signed QR in front of camera {camera}...");
-    let psbt = scan_signed_psbt(camera)?;
-    if psbt.unsigned_tx != original.unsigned_tx {
-        bail!(
-            "scanned signed PSBT does not match {}",
+    let scanned = scan_signed_psbt_bytes(camera)?;
+    match (&original, AnyPsbt::parse(&scanned)?) {
+        (AnyPsbt::V0(original), AnyPsbt::V0(psbt)) => {
+            if psbt.unsigned_tx != original.unsigned_tx {
+                bail!(
+                    "scanned signed PSBT does not match {}",
+                    original_path.display()
+                );
+            }
+        }
+        (AnyPsbt::V2(original), AnyPsbt::V2(psbt)) => {
+            // A silent payment signer is expected to change the output scripts;
+            // verify() allows exactly that and nothing else.
+            let verified = spverify::verify(original, &psbt)?;
+            println!("silent payment outputs verified: {}", verified.len());
+        }
+        _ => bail!(
+            "the scanned PSBT is a different version from {}",
             original_path.display()
-        );
+        ),
     }
-    write_psbt(out, &psbt)?;
+    write_new_file(out, &scanned)?;
     println!("wrote {}", out.display());
     println!(
         "next: kiss-bdk --wallet-dir {} broadcast {} --original {} --dry-run",
@@ -770,7 +785,30 @@ fn scan_psbt(wallet_dir: &Path, out: &Path, original_path: &Path, camera: u32) -
 }
 
 fn inspect_psbt(path: &Path) -> Result<()> {
-    let psbt = read_psbt(path)?;
+    let psbt = match AnyPsbt::parse(&read_psbt_bytes(path)?)? {
+        AnyPsbt::V0(psbt) => psbt,
+        AnyPsbt::V2(v2) => {
+            // Report the silent payment recipients before flattening to v0,
+            // because that is the part a v0 view cannot show.
+            println!("version: PSBTv2 (BIP-375 silent payment)");
+            for (index, output) in v2.outputs.iter().enumerate() {
+                if output.sp_v0_info.is_some() {
+                    let state = if output.script_pubkey.is_empty() {
+                        "awaiting the signer's derivation"
+                    } else {
+                        "derived by the signer"
+                    };
+                    println!("output {index}: silent payment, {state}");
+                }
+            }
+            println!(
+                "ECDH shares: {}, DLEQ proofs: {}",
+                v2.global.sp_ecdh_shares.len(),
+                v2.global.sp_dleq_proofs.len()
+            );
+            spsend::to_v0(&v2)?
+        }
+    };
     println!("inputs: {}", psbt.inputs.len());
     println!("outputs: {}", psbt.outputs.len());
     // Every Bitcoin test network shares one address HRP, so this renders the same
@@ -793,10 +831,30 @@ fn inspect_psbt(path: &Path) -> Result<()> {
 fn broadcast(wallet_dir: &Path, path: &Path, original_path: &Path, dry_run: bool) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
     let (_connection, wallet) = open_wallet(wallet_dir, &config, chain)?;
-    let signed = read_psbt(path)?;
-    let mut psbt = read_psbt(original_path)?;
-    psbt.combine(signed)
-        .context("signed PSBT does not match the original transaction")?;
+    let signed = AnyPsbt::parse(&read_psbt_bytes(path)?)?;
+    let original = AnyPsbt::parse(&read_psbt_bytes(original_path)?)?;
+
+    let mut psbt = match (original, signed) {
+        (AnyPsbt::V0(mut original), AnyPsbt::V0(signed)) => {
+            original
+                .combine(signed)
+                .context("signed PSBT does not match the original transaction")?;
+            original
+        }
+        (AnyPsbt::V2(original), AnyPsbt::V2(signed)) => {
+            // The coordinator cannot build a silent payment output, so instead
+            // of trusting the one it got back it proves the signer derived it
+            // from these inputs and that it pays the intended address.
+            for output in spverify::verify(&original, &signed)? {
+                println!("silent payment output {} verified", output.index);
+            }
+            println!("BIP-374 DLEQ proof: verified");
+            // Every script is known now, so the rest of the path is unchanged.
+            spsend::to_v0(&signed)?
+        }
+        _ => bail!("the signed PSBT is a different version from the original"),
+    };
+
     for txin in &psbt.unsigned_tx.input {
         if wallet.get_utxo(txin.previous_output).is_none() {
             bail!(

@@ -64,6 +64,35 @@ one of them and neither this CLI nor KISS can tell them apart. Keep one
 `--wallet-dir` per network; a wallet directory is pinned to the network it was
 created on, and `init` refuses to overwrite an existing one.
 
+## Silent payments
+
+Send to a BIP-352 address by passing it to `create`:
+
+```sh
+kiss-bdk create --to tsp1… --sats 10000 --qr
+```
+
+A silent payment output script is derived from the *input private keys*, so a
+watch-only wallet cannot compute it. BIP-375 carries the recipient's scan and
+spend keys in the PSBT and lets KISS fill the script in, which is why these
+transactions leave as a PSBTv2 — a v0 PSBT cannot express an output whose script
+is not yet known.
+
+BDK still does all the wallet work: it selects coins and computes change and the
+fee against a taproot placeholder of exactly the size the real output will be.
+
+Nothing about that output is taken on trust. Before broadcasting, `scan` and
+`broadcast` check three things: that KISS returned the same transaction it was
+given apart from the scripts it was asked to fill in, that its BIP-374 DLEQ
+proof shows the ECDH share came from these inputs, and that re-deriving the
+output from that share reproduces the script KISS wrote. Only all three together
+show the payment reaches the address you typed.
+
+`inspect` reads either PSBT version and names the silent payment outputs.
+
+**Sending only.** Receiving requires scanning every block for tweak data, which
+the Esplora backend cannot serve.
+
 ## Topping up
 
 ```sh

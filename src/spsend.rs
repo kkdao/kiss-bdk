@@ -12,7 +12,9 @@
 use anyhow::{Context, Result, bail};
 use bdk_wallet::bitcoin::bip32::KeySource;
 use bdk_wallet::bitcoin::secp256k1::PublicKey as SecpPublicKey;
-use bdk_wallet::bitcoin::{Psbt, PublicKey, ScriptBuf};
+use bdk_wallet::bitcoin::{
+    OutPoint, Psbt, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+};
 use psbt_v2::v2::{Creator, InputBuilder, OutputBuilder};
 
 use crate::sp::SilentPaymentAddress;
@@ -209,4 +211,87 @@ impl<'a> Cursor<'a> {
         }
         usize::try_from(value).context("PSBT field length does not fit in memory")
     }
+}
+
+/// Read a PSBT that may be either version.
+///
+/// The two are told apart by structure rather than by a flag: a PSBTv0 carries
+/// a global unsigned transaction and a v2 must not, so the v0 parser rejects a
+/// v2 outright.
+pub enum AnyPsbt {
+    V0(Psbt),
+    V2(psbt_v2::v2::Psbt),
+}
+
+impl AnyPsbt {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        match Psbt::deserialize(bytes) {
+            Ok(psbt) => Ok(AnyPsbt::V0(psbt)),
+            Err(v0_error) => match psbt_v2::v2::Psbt::deserialize(bytes) {
+                Ok(psbt) => Ok(AnyPsbt::V2(psbt)),
+                Err(v2_error) => bail!("not a PSBT: {v0_error}; and not a PSBTv2: {v2_error}"),
+            },
+        }
+    }
+}
+
+/// Rebuild a v0 PSBT from a signed v2 one.
+///
+/// Once the signer has filled in the silent payment output scripts every output
+/// is known, so the transaction can be expressed as a v0 PSBT again. That lets
+/// the existing signature check, finalization and broadcast path stay as they
+/// are instead of being duplicated for v2.
+pub fn to_v0(v2: &psbt_v2::v2::Psbt) -> Result<Psbt> {
+    let lock_time = v2
+        .determine_lock_time()
+        .map_err(|error| anyhow::anyhow!("PSBTv2 has no usable lock time: {error}"))?;
+
+    let unsigned_tx = Transaction {
+        version: v2.global.tx_version,
+        lock_time,
+        input: v2
+            .inputs
+            .iter()
+            .map(|input| TxIn {
+                previous_output: OutPoint {
+                    txid: input.previous_txid,
+                    vout: input.spent_output_index,
+                },
+                script_sig: ScriptBuf::default(),
+                sequence: input.sequence.unwrap_or(Sequence::ENABLE_RBF_NO_LOCKTIME),
+                witness: Witness::default(),
+            })
+            .collect(),
+        output: v2
+            .outputs
+            .iter()
+            .map(|output| TxOut {
+                value: output.amount,
+                script_pubkey: output.script_pubkey.clone(),
+            })
+            .collect(),
+    };
+
+    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)
+        .map_err(|error| anyhow::anyhow!("rebuilding a v0 PSBT: {error}"))?;
+    for (target, source) in psbt.inputs.iter_mut().zip(v2.inputs.iter()) {
+        target.witness_utxo = source.witness_utxo.clone();
+        target.partial_sigs = source.partial_sigs.clone();
+        target.bip32_derivation = secp_derivations(&source.bip32_derivations);
+        target.final_script_sig = source.final_script_sig.clone();
+        target.final_script_witness = source.final_script_witness.clone();
+    }
+    for (target, source) in psbt.outputs.iter_mut().zip(v2.outputs.iter()) {
+        target.bip32_derivation = secp_derivations(&source.bip32_derivations);
+    }
+    Ok(psbt)
+}
+
+fn secp_derivations(
+    source: &std::collections::BTreeMap<PublicKey, KeySource>,
+) -> std::collections::BTreeMap<SecpPublicKey, KeySource> {
+    source
+        .iter()
+        .map(|(key, origin)| (key.inner, origin.clone()))
+        .collect()
 }
