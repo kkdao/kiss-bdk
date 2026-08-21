@@ -263,6 +263,12 @@ enum Command {
 
     /// Search the chain for silent payments to this wallet.
     SpScan {
+        /// Check one transaction instead of walking the chain. Works before it
+        /// is mined, since the tweak is derived here rather than read from the
+        /// oracle, which only publishes for blocks it has indexed.
+        #[arg(long, value_name = "TXID", conflicts_with_all = ["from", "blindbit"])]
+        tx: Option<String>,
+
         /// First block to search. Defaults to continuing where the last scan
         /// stopped, or the current tip on a wallet that has never scanned.
         #[arg(long)]
@@ -352,7 +358,10 @@ fn main() -> Result<()> {
             camera,
         } => sp_pair(&cli.wallet_dir, scan_qr, key, camera),
         Command::SpAddress => sp_address(&cli.wallet_dir),
-        Command::SpScan { from, blindbit } => sp_scan(&cli.wallet_dir, from, blindbit),
+        Command::SpScan { tx, from, blindbit } => match tx {
+            Some(txid) => sp_scan_tx(&cli.wallet_dir, &txid),
+            None => sp_scan(&cli.wallet_dir, from, blindbit),
+        },
         Command::SpBalance => sp_balance(&cli.wallet_dir),
         Command::Inspect { psbt } => inspect_psbt(&psbt),
         Command::Broadcast {
@@ -544,6 +553,74 @@ fn sp_address(wallet_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Check one transaction for payments to this wallet, mined or not.
+///
+/// The oracle cannot answer for a transaction still in the mempool, which is
+/// exactly the moment someone watching a demo wants an answer. For a single
+/// known transaction the tweak can be derived here from its inputs' previous
+/// scripts instead, at a few requests rather than a chain walk.
+fn sp_scan_tx(wallet_dir: &Path, txid: &str) -> Result<()> {
+    let (config, chain) = load_config(wallet_dir)?;
+    let txid: bdk_wallet::bitcoin::Txid = txid.parse().context("that is not a transaction id")?;
+
+    let (mut connection, _wallet) = open_wallet(wallet_dir, &config, chain)?;
+    spstore::migrate(&mut connection)?;
+    let keys = spstore::keys(&connection)?
+        .context("no silent payment keys; run sp-pair with KISS's export first")?;
+
+    let esplora = esplora(&config);
+    let tx = esplora
+        .get_tx(&txid)
+        .with_context(|| format!("fetching {txid}"))?
+        .with_context(|| format!("{txid} is not known to the backend"))?;
+
+    // BIP-352 sums the inputs' keys, so every input's previous script is
+    // needed; the amounts are not, which is why only the script is read.
+    let mut prevouts = Vec::with_capacity(tx.input.len());
+    for input in &tx.input {
+        let previous = esplora
+            .get_tx(&input.previous_output.txid)
+            .with_context(|| format!("fetching input {}", input.previous_output))?
+            .with_context(|| format!("input {} is unknown", input.previous_output))?;
+        let vout = input.previous_output.vout as usize;
+        let txout = previous.output.get(vout).with_context(|| {
+            format!(
+                "input {} points past its transaction",
+                input.previous_output
+            )
+        })?;
+        prevouts.push(txout.clone());
+    }
+
+    let height = esplora
+        .get_tx_status(&txid)
+        .ok()
+        .and_then(|status| status.block_height)
+        .unwrap_or(spscan::UNCONFIRMED);
+
+    let found = spscan::scan_transaction(&spscan::scanner(&keys), &tx, &prevouts, height)?;
+    for item in &found {
+        let where_ = if item.height == spscan::UNCONFIRMED {
+            "unconfirmed".to_string()
+        } else {
+            format!("block {}", item.height)
+        };
+        println!(
+            "found {} sats at {} ({where_})",
+            item.out.amount.to_sat(),
+            item.out.outpoint
+        );
+    }
+    if found.is_empty() {
+        println!("{txid} pays nothing to this wallet's silent payment address");
+    }
+    // Stored so sp-balance shows it immediately; a later chain scan finds the
+    // same outpoint and updates the row with its real height rather than
+    // adding a second one.
+    spstore::put_found(&mut connection, &found)?;
+    Ok(())
+}
+
 /// Search the chain for payments to this wallet's silent payment address.
 fn sp_scan(wallet_dir: &Path, from: Option<u32>, blindbit_url: Option<String>) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
@@ -643,12 +720,12 @@ fn sp_balance(wallet_dir: &Path) -> Result<()> {
         None => println!("scanned to: never (run sp-scan)"),
     }
     for out in &outputs {
-        println!(
-            "{} sats at {} (block {})",
-            out.amount.to_sat(),
-            out.outpoint,
-            out.height
-        );
+        let seen = if out.height == spscan::UNCONFIRMED {
+            "unconfirmed".to_string()
+        } else {
+            format!("block {}", out.height)
+        };
+        println!("{} sats at {} ({seen})", out.amount.to_sat(), out.outpoint);
     }
     println!("silent payment total: {total} sats");
     // These are not spendable from here yet: moving one needs the signer to

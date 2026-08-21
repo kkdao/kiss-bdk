@@ -477,9 +477,7 @@ mod tests {
 
     #[test]
     fn the_scan_key_filter_takes_kiss_export_and_not_the_wallet_descriptor() {
-        assert!(looks_like_scan_key(
-            "sp([73c5da0a/352h/1h/0h]tspscan1qqqq)"
-        ));
+        assert!(looks_like_scan_key("sp([73c5da0a/352h/1h/0h]tspscan1qqqq)"));
         assert!(looks_like_scan_key("tspscan1qqqq"));
         // Recognised so the import can name the problem rather than hang.
         assert!(looks_like_scan_key("spscan1qqqq"));

@@ -16,12 +16,12 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bdk_sp::compute_shared_secret;
 use bdk_sp::receive::SpOut;
 use bdk_sp::receive::scan::Scanner;
 use bdk_wallet::bitcoin::secp256k1::PublicKey;
-use bdk_wallet::bitcoin::{Block, ScriptBuf};
+use bdk_wallet::bitcoin::{Block, ScriptBuf, Transaction, TxOut};
 
 use crate::spreceive::ScanKeys;
 
@@ -39,6 +39,41 @@ pub struct Found {
 /// candidates, so an empty map cannot cause a miss on the address in use.
 pub fn scanner(keys: &ScanKeys) -> Scanner {
     Scanner::new(keys.scan, keys.spend, Default::default())
+}
+
+/// The height stored for a payment seen before it was mined.
+///
+/// A real height would be a lie and `Option` would spread through the store for
+/// one transient case, so unconfirmed is its own value and printed as such.
+pub const UNCONFIRMED: u32 = 0;
+
+/// Search a single transaction, deriving its tweak locally.
+///
+/// The oracle only publishes tweaks for blocks it has indexed, so a payment
+/// cannot be seen this way until it is mined — no use when the transaction was
+/// broadcast a moment ago and someone is watching. For one known transaction
+/// the tweak can be computed here instead, from its inputs' previous scripts,
+/// which is a handful of requests rather than a chain walk.
+///
+/// `prevouts` must hold one entry per input, in input order: `bdk_sp` zips the
+/// two and a short slice would silently sum the wrong keys.
+pub fn scan_transaction(
+    scanner: &Scanner,
+    tx: &Transaction,
+    prevouts: &[TxOut],
+    height: u32,
+) -> Result<Vec<Found>> {
+    if prevouts.len() != tx.input.len() {
+        bail!(
+            "{} prevouts for {} inputs; the tweak would be computed from the wrong keys",
+            prevouts.len(),
+            tx.input.len()
+        );
+    }
+    let outs = scanner
+        .scan_tx(tx, prevouts)
+        .with_context(|| format!("scanning {}", tx.compute_txid()))?;
+    Ok(outs.into_iter().map(|out| Found { height, out }).collect())
 }
 
 /// Search one block for payments to this wallet.
