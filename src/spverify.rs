@@ -74,8 +74,20 @@ pub fn verify(original: &PsbtV2, signed: &PsbtV2) -> Result<Vec<VerifiedOutput>>
         verified.push(VerifiedOutput { index, scan });
     }
 
-    if verified.is_empty() {
-        bail!("this PSBT carries no silent payment outputs to verify");
+    // Counted against the original rather than required to be non-empty. A
+    // BIP-376 spend pays an ordinary address, so it legitimately has no silent
+    // payment outputs at all -- and stating the rule this way is stronger than
+    // "at least one", because it also catches a signer that dropped one.
+    let expected = original
+        .outputs
+        .iter()
+        .filter(|output| output.sp_v0_info.is_some())
+        .count();
+    if verified.len() != expected {
+        bail!(
+            "the signer completed {} of {expected} silent payment output(s)",
+            verified.len()
+        );
     }
     Ok(verified)
 }
@@ -90,6 +102,27 @@ fn same_transaction(original: &PsbtV2, signed: &PsbtV2) -> Result<()> {
     }
     if original.outputs.len() != signed.outputs.len() {
         bail!("the signer returned a different number of outputs");
+    }
+    // Everything below changes the txid, and therefore the message that was
+    // signed. Since the signature is verified against the hash re-derived from
+    // the *signed* PSBT, a signer that altered one of these and signed its own
+    // version would otherwise pass every check here: the numbers on the screen
+    // would be right and the transaction broadcast would be a different one.
+    // A v0 PSBT is safe from this by accident, because `Psbt::combine` refuses
+    // a differing unsigned transaction. A v2 has no such backstop.
+    if original.global.fallback_lock_time != signed.global.fallback_lock_time {
+        bail!("the signer returned a different lock time");
+    }
+    if signed.global.tx_modifiable_flags != 0 {
+        bail!("the signer returned a transaction still marked modifiable");
+    }
+    for (index, (before, after)) in original.inputs.iter().zip(signed.inputs.iter()).enumerate() {
+        if before.sequence != after.sequence {
+            bail!("the signer changed the sequence of input {index}");
+        }
+        if before.min_time != after.min_time || before.min_height != after.min_height {
+            bail!("the signer changed the lock time requirement of input {index}");
+        }
     }
     for (index, (before, after)) in original
         .outputs

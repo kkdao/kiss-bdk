@@ -132,9 +132,40 @@ pointed at, so it can only ever be a testnet key.
 Signet is the only chain here with a published tweak server, the one BDK's own
 workshop uses. Point `--blindbit` at another to override it.
 
-**Found, not yet spendable.** Moving a received silent payment needs KISS to
-sign with its spend key plus the output's tweak, and without the usual taproot
-tweak — a signer change this coordinator cannot ask for yet.
+### Spending what was received
+
+```sh
+kiss-bdk create --to tb1q... --sats 10000 --from-sp --qr
+```
+
+A received silent payment pays `B_spend + t*G`, so its private key is the spend
+key plus the output's tweak. That is not a BIP-32 child of anything, which is
+why no descriptor holds these coins and why `--from-sp` is a separate source
+rather than part of the ordinary balance. BDK still computes the fee and the
+change; the tweak travels as BIP-376's `PSBT_IN_SP_TWEAK` and KISS adds it to
+the spend key it kept.
+
+Nothing is taken on trust in either direction. Before the PSBT is written, every
+candidate is re-derived here and dropped unless the tweak reproduces the script
+the output actually pays — the same check KISS makes, so a store left over from
+a previous pairing says so by name instead of being refused across the room.
+Before broadcast, the returned Schnorr signature is verified against the key
+this coordinator worked out for itself.
+
+**Silent payment coins are spent on their own.** A transaction mixing them with
+ordinary ones is refused by the signer, and the reason is worth knowing: BIP-143
+commits only to the amount of the input being signed, so with two or more inputs
+a coordinator can run two individually-truthful signing sessions and combine
+them into a transaction paying a fee neither screen showed. BIP-341 hashes every
+input amount, so an all-taproot spend proves its own fee. A P2WPKH input does
+not. So if the silent payment balance cannot cover a payment, the ordinary
+balance cannot make up the difference — `create` says so rather than building
+something KISS will reject.
+
+Change goes back to an ordinary wallet address for now, which links the coin to
+the descriptor wallet. Sending change back to this wallet's own silent payment
+code needs BIP-376 inputs and BIP-375 outputs in one PSBT; the signer supports
+it and this coordinator does not yet.
 
 [BlindBit]: https://github.com/setavenger/blindbit-oracle
 

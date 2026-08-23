@@ -9,7 +9,9 @@ use anyhow::{Context, Result, bail};
 use bdk_esplora::EsploraExt;
 use bdk_esplora::esplora_client::{BlockingClient, Builder};
 use bdk_wallet::bitcoin::address::NetworkUnchecked;
-use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt};
+use bdk_wallet::bitcoin::bip32::KeySource;
+use bdk_wallet::bitcoin::secp256k1::PublicKey;
+use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt, Sequence};
 use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
@@ -20,10 +22,12 @@ use kiss_bdk::sp::{self, SilentPaymentAddress};
 use kiss_bdk::spreceive;
 use kiss_bdk::spscan;
 use kiss_bdk::spsend::{self, AnyPsbt};
+use kiss_bdk::spspend;
 use kiss_bdk::spstore;
 use kiss_bdk::spverify;
 use kiss_bdk::{
-    read_psbt_bytes, split_kiss_descriptor, verify_psbt_ecdsa_signatures, write_new_file,
+    kiss_fingerprint, read_psbt_bytes, split_kiss_descriptor, verify_psbt_signatures,
+    write_new_file,
 };
 use serde::{Deserialize, Serialize};
 
@@ -226,6 +230,12 @@ enum Command {
         /// Display the unsigned PSBT as a QR for KISS to scan.
         #[arg(long)]
         qr: bool,
+
+        /// Spend received silent payments instead of the descriptor wallet's
+        /// coins. KISS refuses a transaction that mixes the two, so this is a
+        /// choice rather than a hint.
+        #[arg(long)]
+        from_sp: bool,
     },
 
     /// Scan KISS's animated signed-PSBT QR with the computer webcam.
@@ -346,7 +356,8 @@ fn main() -> Result<()> {
             fee_rate,
             out,
             qr,
-        } => create_psbt(&cli.wallet_dir, &to, sats, fee_rate, &out, qr),
+            from_sp,
+        } => create_psbt(&cli.wallet_dir, &to, sats, fee_rate, &out, qr, from_sp),
         Command::Scan {
             out,
             original,
@@ -728,11 +739,12 @@ fn sp_balance(wallet_dir: &Path) -> Result<()> {
         println!("{} sats at {} ({seen})", out.amount.to_sat(), out.outpoint);
     }
     println!("silent payment total: {total} sats");
-    // These are not spendable from here yet: moving one needs the signer to
-    // sign with its spend key plus the output's tweak, which it cannot be asked
-    // to do over the PSBT flow this coordinator speaks today.
+    // Worth saying here rather than only in the error: these coins are spent on
+    // their own, so a reader comparing this total against the wallet balance
+    // does not conclude the two add up.
     if !outputs.is_empty() {
-        println!("note: found, not yet spendable; spending needs signer support");
+        println!("spend with: create --from-sp (silent payments are never mixed");
+        println!("            with ordinary coins in one transaction)");
     }
     Ok(())
 }
@@ -870,6 +882,7 @@ fn create_psbt(
     fee_rate: u64,
     out: &Path,
     qr: bool,
+    from_sp: bool,
 ) -> Result<()> {
     if sats == 0 {
         bail!("--sats must be greater than zero");
@@ -897,7 +910,45 @@ fn create_psbt(
     let fee_rate = FeeRate::from_sat_per_vb(fee_rate).context("fee rate is too large")?;
 
     let (mut connection, mut wallet) = open_wallet(wallet_dir, &config, chain)?;
+    let sp_spend = if from_sp {
+        spstore::migrate(&mut connection)?;
+        Some(prepare_sp_spend(
+            &connection,
+            &config,
+            Amount::from_sat(sats),
+            fee_rate,
+        )?)
+    } else {
+        None
+    };
+    let sp_coins: &[spspend::SpCoin] = sp_spend.as_ref().map_or(&[], |sp| &sp.coins);
+
     let mut builder = wallet.build_tx();
+    if let Some(sp) = &sp_spend {
+        for coin in &sp.coins {
+            // Everything handed to the builder this way becomes a *required*
+            // input (bdk_wallet wallet/mod.rs:1431), which is why the selection
+            // above chose rather than offered: adding every candidate would
+            // sweep the whole silent payment balance into one transaction.
+            //
+            // The sequence is explicit because `add_foreign_utxo` defaults to
+            // Sequence::MAX and the foreign value wins over the one BDK would
+            // otherwise set -- which would quietly turn RBF off and disable
+            // this input's nLockTime while the transaction still carried one.
+            builder
+                .add_foreign_utxo_with_sequence(
+                    coin.outpoint,
+                    spspend::psbt_input(coin, &sp.spend, &sp.origin),
+                    spspend::SATISFACTION_WEIGHT,
+                    Sequence::ENABLE_RBF_NO_LOCKTIME,
+                )
+                .with_context(|| format!("adding silent payment {}", coin.outpoint))?;
+        }
+        // Without this BDK tops the transaction up from the descriptor wallet,
+        // and a transaction mixing silent payment inputs with ordinary ones is
+        // one KISS refuses outright.
+        builder.manually_selected_only();
+    }
     // Every input carries its full previous transaction, which is what lets the
     // signer prove each input amount by hashing it back to its outpoint.
     //
@@ -917,12 +968,23 @@ fn create_psbt(
     let psbt = builder.finish().context("building transaction")?;
     // A silent payment leaves as a PSBTv2: only the signer can derive the
     // output script, so v0's fixed unsigned transaction cannot carry it.
-    let serialized = match &recipient {
-        Destination::Address(_) => psbt.serialize(),
-        Destination::SilentPayment(sp) => {
-            let index = spsend::placeholder_index(&psbt, sp)?;
-            spsend::build_sp_psbt(&psbt, index, sp)?
-        }
+    // A silent payment output leaves as a PSBTv2 because only the signer can
+    // derive its script. A silent payment *input* leaves as one too, for a
+    // different reason: the signer computes its taproot sighash only from the
+    // transaction view it extracts from a v2's own fields, so a v0 carrying
+    // tweaks loads green and then fails to sign.
+    let sp_outputs = match &recipient {
+        Destination::Address(_) => Vec::new(),
+        Destination::SilentPayment(sp) => vec![spsend::SpOutput {
+            index: spsend::placeholder_index(&psbt, sp)?,
+            recipient: *sp,
+        }],
+    };
+    let want_v2 = !sp_outputs.is_empty() || !sp_coins.is_empty();
+    let serialized = if want_v2 {
+        spsend::build_v2(&psbt, &sp_outputs)?
+    } else {
+        psbt.serialize()
     };
     let psbt_size = serialized.len();
     if psbt.inputs.len() > KISS_MAX_INPUTS {
@@ -940,7 +1002,11 @@ fn create_psbt(
     if psbt_size > KISS_MAX_PSBT_BYTES {
         bail!("unsigned PSBT is {psbt_size} bytes; KISS accepts at most {KISS_MAX_PSBT_BYTES}");
     }
-    let estimated_signed_size = estimated_signed_psbt_size(psbt_size, psbt.inputs.len())?;
+    let estimated_signed_size = estimated_signed_psbt_size(
+        psbt_size,
+        psbt.inputs.len() - sp_coins.len(),
+        sp_coins.len(),
+    )?;
     if qr && estimated_signed_size > KISS_MAX_QR_PSBT_BYTES {
         bail!(
             "KISS's signed QR encoder holds at most {KISS_MAX_QR_PSBT_BYTES} bytes; this PSBT may grow to {estimated_signed_size} bytes"
@@ -959,11 +1025,32 @@ fn create_psbt(
         write_new_file(path, &png)?;
     }
 
-    let fee = wallet.calculate_fee(&psbt.unsigned_tx)?;
+    // `calculate_fee` walks the wallet's own tx graph, which has never seen a
+    // silent payment output. The documented remedy is `insert_txout`, but that
+    // stages a floating txout into the graph and persists it on the next save,
+    // so the sum is done here instead from the amounts the store already holds.
+    let fee = if sp_coins.is_empty() {
+        wallet.calculate_fee(&psbt.unsigned_tx)?
+    } else {
+        let inputs: Amount = sp_coins.iter().map(|coin| coin.amount).sum();
+        let outputs: Amount = psbt.unsigned_tx.output.iter().map(|out| out.value).sum();
+        inputs
+            .checked_sub(outputs)
+            .context("silent payment inputs do not cover the outputs")?
+    };
     println!("wrote {}", out.display());
     println!("network: {}", chain.label());
     if let Destination::SilentPayment(_) = recipient {
         println!("silent payment: BIP-375 PSBTv2; KISS derives the output script");
+    }
+    if !sp_coins.is_empty() {
+        println!(
+            "spending {} received silent payment(s): BIP-376 PSBTv2",
+            sp_coins.len()
+        );
+        for coin in sp_coins {
+            println!("  {} ({} sats)", coin.outpoint, coin.amount.to_sat());
+        }
     }
     println!("send: {} sats", sats);
     println!("fee: {} sats", fee.to_sat());
@@ -986,6 +1073,78 @@ fn create_psbt(
         );
     }
     Ok(())
+}
+
+/// The silent payment coins a spend will use, and what the PSBT needs to name
+/// them.
+struct SpSpend {
+    coins: Vec<spspend::SpCoin>,
+    spend: PublicKey,
+    origin: KeySource,
+}
+
+/// Choose which received silent payments to spend.
+///
+/// Four things can be wrong with a stored row, and only the first is mere
+/// staleness: it can be unconfirmed, its funding transaction can have been
+/// reorged away, the coin can already be spent, or the tweak can no longer
+/// reproduce the script -- which is what a wallet re-paired to a different KISS
+/// looks like from here. The store answers the first, Esplora the next two, and
+/// re-derivation the last.
+fn prepare_sp_spend(
+    connection: &Connection,
+    config: &Config,
+    target: Amount,
+    fee_rate: FeeRate,
+) -> Result<SpSpend> {
+    let keys = spstore::keys(connection)?
+        .context("no silent payment keys; run sp-pair with KISS's export first")?;
+    let stored = spstore::candidates(connection)?;
+    if stored.is_empty() {
+        bail!(
+            "no confirmed silent payments to spend; run sp-scan first, and note that \
+             a payment cannot be seen until it is mined"
+        );
+    }
+
+    let client = esplora(config);
+    let mut candidates = Vec::new();
+    let mut spent = 0_usize;
+    let mut missing = 0_usize;
+    for out in &stored {
+        // Re-derive before asking the network: a coin this wallet cannot prove
+        // it owns should say so by name, not turn into a lookup.
+        let coin = spspend::SpCoin::checked(out, &keys.spend)?;
+        match client
+            .get_output_status(&out.outpoint.txid, u64::from(out.outpoint.vout))
+            .with_context(|| format!("asking Esplora about {}", out.outpoint))?
+        {
+            // Esplora answers `None` both for a transaction it has never seen
+            // and for a vout past the end of one it has, so this covers a
+            // funding transaction reorged out from under a stored row --
+            // sp-scan's watermark only walks forward and would never notice.
+            None => missing += 1,
+            Some(status) if status.spent => spent += 1,
+            Some(_) => candidates.push(coin),
+        }
+    }
+    if spent > 0 {
+        println!("skipping {spent} silent payment(s) already spent");
+    }
+    if missing > 0 {
+        println!(
+            "skipping {missing} silent payment(s) {} no longer knows about; \
+             their funding transaction may have been reorged out",
+            config.esplora
+        );
+    }
+
+    let coins = spspend::select(candidates, target, fee_rate, KISS_MAX_INPUTS)?;
+    Ok(SpSpend {
+        origin: spspend::spend_origin(kiss_fingerprint(&config.descriptor)?),
+        spend: keys.spend,
+        coins,
+    })
 }
 
 /// Where a `create` is being sent.
@@ -1068,9 +1227,20 @@ fn scan_psbt(wallet_dir: &Path, out: &Path, original_path: &Path, camera: u32) -
         }
         (AnyPsbt::V2(original), AnyPsbt::V2(psbt)) => {
             // A silent payment signer is expected to change the output scripts;
-            // verify() allows exactly that and nothing else.
+            // verify() allows exactly that and nothing else. A BIP-376 spend
+            // pays an ordinary address, so it has no such output and the check
+            // that matters is the one broadcast makes on the signature.
             let verified = spverify::verify(original, &psbt)?;
-            println!("silent payment outputs verified: {}", verified.len());
+            if verified.is_empty() {
+                let signed = psbt
+                    .inputs
+                    .iter()
+                    .filter(|input| input.tap_key_sig.is_some())
+                    .count();
+                println!("silent payment inputs signed: {signed}");
+            } else {
+                println!("silent payment outputs verified: {}", verified.len());
+            }
         }
         _ => bail!(
             "the scanned PSBT is a different version from {}",
@@ -1126,6 +1296,9 @@ fn inspect_psbt(path: &Path) -> Result<()> {
             input.final_script_sig.is_some()
                 || input.final_script_witness.is_some()
                 || !input.partial_sigs.is_empty()
+                // A BIP-376 input's signature is schnorr and lives here, so a
+                // fully signed silent payment spend read 0/1 without it.
+                || input.tap_key_sig.is_some()
         })
         .count();
     println!("inputs carrying signatures: {signed}/{}", psbt.inputs.len());
@@ -1134,7 +1307,8 @@ fn inspect_psbt(path: &Path) -> Result<()> {
 
 fn broadcast(wallet_dir: &Path, path: &Path, original_path: &Path, dry_run: bool) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
-    let (_connection, wallet) = open_wallet(wallet_dir, &config, chain)?;
+    let (mut connection, wallet) = open_wallet(wallet_dir, &config, chain)?;
+    spstore::migrate(&mut connection)?;
     let signed = AnyPsbt::parse(&read_psbt_bytes(path)?)?;
     let original = AnyPsbt::parse(&read_psbt_bytes(original_path)?)?;
 
@@ -1148,29 +1322,57 @@ fn broadcast(wallet_dir: &Path, path: &Path, original_path: &Path, dry_run: bool
         (AnyPsbt::V2(original), AnyPsbt::V2(signed)) => {
             // The coordinator cannot build a silent payment output, so instead
             // of trusting the one it got back it proves the signer derived it
-            // from these inputs and that it pays the intended address.
-            for output in spverify::verify(&original, &signed)? {
+            // from these inputs and that it pays the intended address. A
+            // BIP-376 spend has no such output and verifies nothing here; its
+            // own check is the signature, below.
+            let verified = spverify::verify(&original, &signed)?;
+            for output in &verified {
                 println!("silent payment output {} verified", output.index);
             }
-            println!("BIP-374 DLEQ proof: verified");
+            if !verified.is_empty() {
+                println!("BIP-374 DLEQ proof: verified");
+            }
             // Every script is known now, so the rest of the path is unchanged.
             spsend::to_v0(&signed)?
         }
         _ => bail!("the signed PSBT is a different version from the original"),
     };
 
+    // A silent payment is not in BDK's UTXO set and never will be, so an input
+    // belongs to this wallet if BDK knows it *or* the silent payment store
+    // does. Rebuilding the coins here rather than trusting the PSBT also
+    // re-runs the ownership derivation against the currently paired keys.
+    let sp_coins = signed_sp_coins(&connection, &psbt)?;
     for txin in &psbt.unsigned_tx.input {
-        if wallet.get_utxo(txin.previous_output).is_none() {
+        let known = wallet.get_utxo(txin.previous_output).is_some()
+            || sp_coins
+                .iter()
+                .any(|coin| coin.outpoint == txin.previous_output);
+        if !known {
             bail!(
-                "input {} is not a current {} wallet UTXO; run sync and use the original PSBT created by this wallet",
+                "input {} is neither a current {} wallet UTXO nor a silent payment this wallet found; run sync and use the original PSBT created by this wallet",
                 txin.previous_output,
                 chain.label()
             );
         }
     }
-    verify_psbt_ecdsa_signatures(&psbt)?;
-    println!("KISS ECDSA signatures: verified");
+
+    let sp_inputs = spspend::sp_inputs(&psbt, &sp_coins)?;
+    verify_psbt_signatures(&psbt, &sp_inputs)?;
+    if sp_inputs.is_empty() {
+        println!("KISS ECDSA signatures: verified");
+    } else {
+        println!(
+            "KISS signatures: verified ({} silent payment, {} ECDSA)",
+            sp_inputs.len(),
+            psbt.inputs.len() - sp_inputs.len()
+        );
+    }
     print_transaction_summary(&psbt, chain.network())?;
+    // BDK finalizes through a descriptor and no descriptor matches a silent
+    // payment script, so these are turned into witnesses here. Its own
+    // finalizer skips an input that already has one, so the two compose.
+    spspend::finalize(&mut psbt, &sp_inputs)?;
     if !wallet.finalize_psbt(&mut psbt, SignOptions::default())? {
         bail!("PSBT is not fully signed/finalizable; sign it on KISS first");
     }
@@ -1193,6 +1395,35 @@ fn broadcast(wallet_dir: &Path, path: &Path, original_path: &Path, dry_run: bool
     Ok(())
 }
 
+/// The silent payment coins a signed PSBT spends, rebuilt from the store.
+///
+/// Deliberately not read from the PSBT's own tweak fields. The tweak names a
+/// key, and verifying a signature against the key a returned PSBT asked for
+/// would prove only that the signer was self-consistent. These come from the
+/// store and are re-derived against the currently paired spend key, so the
+/// signature is checked against a key this coordinator worked out for itself.
+fn signed_sp_coins(connection: &Connection, psbt: &Psbt) -> Result<Vec<spspend::SpCoin>> {
+    let mut mine = Vec::new();
+    for txin in &psbt.unsigned_tx.input {
+        if !spstore::contains(connection, txin.previous_output)? {
+            continue;
+        }
+        let keys = spstore::keys(connection)?
+            .context("this PSBT spends a silent payment but the wallet is not paired")?;
+        let stored = spstore::outputs(connection)?
+            .into_iter()
+            .find(|out| out.outpoint == txin.previous_output)
+            .with_context(|| {
+                format!(
+                    "silent payment {} vanished from the store",
+                    txin.previous_output
+                )
+            })?;
+        mine.push(spspend::SpCoin::checked(&stored, &keys.spend)?);
+    }
+    Ok(mine)
+}
+
 fn validate_sd_psbt_path(path: &Path) -> Result<()> {
     let name = path
         .file_name()
@@ -1211,9 +1442,22 @@ fn validate_sd_psbt_path(path: &Path) -> Result<()> {
     )
 }
 
-fn estimated_signed_psbt_size(unsigned_size: usize, inputs: usize) -> Result<usize> {
-    inputs
+/// How large the signed PSBT may come back.
+///
+/// The two input kinds grow by different amounts, and pricing a taproot input
+/// at the ECDSA figure refuses transactions the device would sign happily. An
+/// ECDSA input gains a key, a length and a signature with room to spare; a
+/// BIP-376 input gains exactly PSBT_IN_TAP_KEY_SIG: two key bytes, one length
+/// byte and a 64-byte signature.
+fn estimated_signed_psbt_size(
+    unsigned_size: usize,
+    ecdsa_inputs: usize,
+    taproot_inputs: usize,
+) -> Result<usize> {
+    const TAPROOT_SIG_BYTES: usize = 2 + 1 + 64;
+    ecdsa_inputs
         .checked_mul(KISS_MAX_PARTIAL_SIG_BYTES)
+        .and_then(|growth| growth.checked_add(taproot_inputs.checked_mul(TAPROOT_SIG_BYTES)?))
         .and_then(|growth| unsigned_size.checked_add(growth))
         .context("PSBT size overflow")
 }
@@ -1268,8 +1512,12 @@ mod tests {
 
     #[test]
     fn estimates_kiss_signature_growth_conservatively() {
-        assert_eq!(estimated_signed_psbt_size(300, 2).unwrap(), 520);
-        assert!(estimated_signed_psbt_size(4096, 6).unwrap() > KISS_MAX_SIGNED_PSBT_BYTES);
+        assert_eq!(estimated_signed_psbt_size(300, 2, 0).unwrap(), 520);
+        // A taproot input grows by exactly its 67-byte PSBT_IN_TAP_KEY_SIG,
+        // not the ECDSA allowance -- pricing it at the larger figure refuses
+        // transactions KISS would sign.
+        assert_eq!(estimated_signed_psbt_size(300, 0, 2).unwrap(), 434);
+        assert!(estimated_signed_psbt_size(4096, 6, 0).unwrap() > KISS_MAX_SIGNED_PSBT_BYTES);
     }
 
     #[test]

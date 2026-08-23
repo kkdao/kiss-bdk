@@ -159,6 +159,39 @@ pub fn outputs(connection: &Connection) -> Result<Vec<StoredOut>> {
     Ok(out)
 }
 
+/// The outputs worth offering to a spend, oldest first.
+///
+/// The store's own opinion, and only that: confirmed, and not the sentinel a
+/// payment seen in the mempool is stored under. Whether a coin has already been
+/// spent is Esplora's answer rather than this table's — a column here would go
+/// stale the moment anything else moved the coin, and a wrong "unspent" is a
+/// transaction that dies at broadcast after a walk to the device.
+///
+/// An unconfirmed output is excluded for a reason beyond depth: it was matched
+/// against a mempool transaction rather than a block, and if that transaction is
+/// replaced the tweak describes a coin that never existed.
+pub fn candidates(connection: &Connection) -> Result<Vec<StoredOut>> {
+    Ok(outputs(connection)?
+        .into_iter()
+        .filter(|out| out.height != crate::spscan::UNCONFIRMED)
+        .collect())
+}
+
+/// Whether this outpoint is a silent payment this wallet found.
+///
+/// `broadcast` needs it: an SP input is not in BDK's UTXO set, so the check that
+/// every input belongs to this wallet has to ask here too.
+pub fn contains(connection: &Connection, outpoint: OutPoint) -> Result<bool> {
+    let count: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM kiss_sp_outputs WHERE txid = ?1 AND vout = ?2",
+            params![outpoint.txid.to_string(), outpoint.vout],
+            |row| row.get(0),
+        )
+        .context("looking up a silent payment output")?;
+    Ok(count > 0)
+}
+
 /// The last height searched, if any.
 pub fn watermark(connection: &Connection) -> Result<Option<u32>> {
     connection
