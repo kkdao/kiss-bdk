@@ -12,6 +12,7 @@ use bdk_wallet::bitcoin::address::NetworkUnchecked;
 use bdk_wallet::bitcoin::bip32::KeySource;
 use bdk_wallet::bitcoin::secp256k1::PublicKey;
 use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt, Sequence, constants};
+use bdk_wallet::coin_selection::LargestFirstCoinSelection;
 use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
@@ -1012,8 +1013,21 @@ fn classify(stored_height: u32, spent: Option<bool>) -> Standing {
 }
 
 fn standing_of(client: &BlockingClient, out: &spstore::StoredOut) -> Standing {
-    match client.get_output_status(&out.outpoint.txid, u64::from(out.outpoint.vout)) {
+    let standing = match client.get_output_status(&out.outpoint.txid, u64::from(out.outpoint.vout))
+    {
         Ok(status) => classify(out.height, status.map(|status| status.spent)),
+        Err(_) => return Standing::Unchecked,
+    };
+    if standing != Standing::Unconfirmed {
+        return standing;
+    }
+    // Esplora answers about the outputs of transactions it has never seen: a
+    // replaced one still reports `{"confirmed": false}` and an unspent output,
+    // exactly like a payment still waiting for a block. Only fetching the
+    // transaction itself tells the two apart.
+    match client.get_tx(&out.outpoint.txid) {
+        Ok(Some(_)) => Standing::Unconfirmed,
+        Ok(None) => Standing::Gone,
         Err(_) => Standing::Unchecked,
     }
 }
@@ -1033,8 +1047,17 @@ fn sp_balance(wallet_dir: &Path) -> Result<()> {
     let client = esplora(&config);
     let mut spendable = 0_u64;
     let mut stale = 0_usize;
+    let mut forgotten = 0_usize;
     for out in &outputs {
         let standing = standing_of(&client, out);
+        // Never mined and the chain has never heard of it: a mempool match
+        // whose transaction was replaced. Nothing revisits it otherwise, so it
+        // would sit here inflating this list forever.
+        if standing == Standing::Gone && out.height == spscan::UNCONFIRMED {
+            spstore::forget(&connection, out.outpoint)?;
+            forgotten += 1;
+            continue;
+        }
         let seen = if out.height == spscan::UNCONFIRMED {
             String::new()
         } else {
@@ -1053,6 +1076,9 @@ fn sp_balance(wallet_dir: &Path) -> Result<()> {
     }
 
     println!("spendable: {spendable} sats");
+    if forgotten > 0 {
+        println!("forgot {forgotten} output(s) whose transaction was replaced before it was mined");
+    }
     if stale > 0 {
         println!(
             "{stale} output(s) above are no longer yours to spend and are not counted; \
@@ -1217,6 +1243,55 @@ fn own_sp_address(connection: &Connection, chain: Chain) -> Result<sp::SilentPay
     })
 }
 
+/// Assemble the transaction, whichever way its coins were chosen.
+///
+/// Split out because `coin_selection` changes the builder's type, so the two
+/// callers cannot share one `builder` binding.
+fn build_transaction<Cs: bdk_wallet::coin_selection::CoinSelectionAlgorithm>(
+    mut builder: bdk_wallet::TxBuilder<'_, Cs>,
+    sp_spend: Option<&SpSpend>,
+    sp_change: Option<&sp::SilentPaymentAddress>,
+    recipient: &Destination,
+    sats: u64,
+    fee_rate: FeeRate,
+) -> Result<Psbt> {
+    if let Some(sp) = sp_spend {
+        for coin in &sp.coins {
+            // Everything handed to the builder this way becomes a *required*
+            // input (bdk_wallet wallet/mod.rs:1431), which is why the selection
+            // above chose rather than offered: adding every candidate would
+            // sweep the whole silent payment balance into one transaction.
+            //
+            // The sequence is explicit because `add_foreign_utxo` defaults to
+            // Sequence::MAX and the foreign value wins over the one BDK would
+            // otherwise set -- which would quietly turn RBF off and disable
+            // this input's nLockTime while the transaction still carried one.
+            builder
+                .add_foreign_utxo_with_sequence(
+                    coin.outpoint,
+                    spspend::psbt_input(coin, &sp.spend, &sp.origin),
+                    spspend::SATISFACTION_WEIGHT,
+                    Sequence::ENABLE_RBF_NO_LOCKTIME,
+                )
+                .with_context(|| format!("adding silent payment {}", coin.outpoint))?;
+        }
+        // Without this BDK tops the transaction up from the descriptor wallet,
+        // and a transaction mixing silent payment inputs with ordinary ones is
+        // one KISS refuses outright.
+        builder.manually_selected_only();
+    }
+    if let Some(change) = sp_change {
+        // BDK sends change here instead of the internal keychain
+        // (wallet/mod.rs:1445). A P2TR placeholder is also what makes it size
+        // the change output correctly, since the real one is P2TR.
+        builder.drain_to(spsend::placeholder_script(change));
+    }
+    builder
+        .add_recipient(recipient.script_pubkey(), Amount::from_sat(sats))
+        .fee_rate(fee_rate);
+    builder.finish().context("building transaction")
+}
+
 fn create_psbt(
     wallet_dir: &Path,
     destination: &str,
@@ -1281,55 +1356,31 @@ fn create_psbt(
         None
     };
 
-    let mut builder = wallet.build_tx();
-    if let Some(sp) = &sp_spend {
-        for coin in &sp.coins {
-            // Everything handed to the builder this way becomes a *required*
-            // input (bdk_wallet wallet/mod.rs:1431), which is why the selection
-            // above chose rather than offered: adding every candidate would
-            // sweep the whole silent payment balance into one transaction.
-            //
-            // The sequence is explicit because `add_foreign_utxo` defaults to
-            // Sequence::MAX and the foreign value wins over the one BDK would
-            // otherwise set -- which would quietly turn RBF off and disable
-            // this input's nLockTime while the transaction still carried one.
-            builder
-                .add_foreign_utxo_with_sequence(
-                    coin.outpoint,
-                    spspend::psbt_input(coin, &sp.spend, &sp.origin),
-                    spspend::SATISFACTION_WEIGHT,
-                    Sequence::ENABLE_RBF_NO_LOCKTIME,
-                )
-                .with_context(|| format!("adding silent payment {}", coin.outpoint))?;
-        }
-        // Without this BDK tops the transaction up from the descriptor wallet,
-        // and a transaction mixing silent payment inputs with ordinary ones is
-        // one KISS refuses outright.
-        builder.manually_selected_only();
-    }
-    // Every input carries its full previous transaction, which is what lets the
-    // signer prove each input amount by hashing it back to its outpoint.
-    //
-    // Witness UTXOs alone are cheaper and were used here first, but a witness
-    // UTXO states an amount nothing commits to. With two or more inputs a
-    // coordinator can understate one and the difference becomes fee, invisible
-    // on the device and unrecoverable after signing -- so KISS refuses to sign
-    // that shape rather than warn about it. Attaching the previous transactions
-    // is BIP-174's own recommendation and what Core, Sparrow and Electrum send.
-    //
-    // It costs about 116 bytes per input, which the QR still carries; and if a
-    // transaction ever does outgrow the QR, `create` says so here rather than
-    // the device refusing it after the walk across the room.
-    if let Some(change) = &sp_change {
-        // BDK sends change here instead of the internal keychain
-        // (wallet/mod.rs:1445). A P2TR placeholder is also what makes it size
-        // the change output correctly, since the real one is P2TR.
-        builder.drain_to(spsend::placeholder_script(change));
-    }
-    builder
-        .add_recipient(recipient.script_pubkey(), Amount::from_sat(sats))
-        .fee_rate(fee_rate);
-    let psbt = builder.finish().context("building transaction")?;
+    // Coin selection is randomized by default, so the same command can produce
+    // a QR the camera reads and, run again, one it cannot: each extra input
+    // drags its full previous transaction along. Largest-first is deterministic
+    // and uses the fewest inputs, which is exactly what a fixed frame budget
+    // wants. Only when `--qr` is set; the file path has no such limit and keeps
+    // the better privacy of the default.
+    let psbt = if qr {
+        build_transaction(
+            wallet.build_tx().coin_selection(LargestFirstCoinSelection),
+            sp_spend.as_ref(),
+            sp_change.as_ref(),
+            &recipient,
+            sats,
+            fee_rate,
+        )?
+    } else {
+        build_transaction(
+            wallet.build_tx(),
+            sp_spend.as_ref(),
+            sp_change.as_ref(),
+            &recipient,
+            sats,
+            fee_rate,
+        )?
+    };
     // A silent payment leaves as a PSBTv2: only the signer can derive the
     // output script, so v0's fixed unsigned transaction cannot carry it.
     // A silent payment output leaves as a PSBTv2 because only the signer can

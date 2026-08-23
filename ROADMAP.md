@@ -29,17 +29,10 @@ Then: the same receive-and-spend loop, at 30 seconds a block.
 
 ## Next
 
-**Stop `--qr` failing at random.** Coin selection picks its inputs
-non-deterministically, so the same command can produce a QR the camera can read
-or one it cannot. Two ways out, and they are worth doing in this order:
-
-1. Prefer fewer inputs when `--qr` is set. Small, fixes the surprise.
-2. Animated QR from computer to device. The device's decoder already handles
-   multi-part input; only this side is single-frame.
-
-**Prune silent payment outputs that no longer exist.** A payment seen in the
-mempool and then replaced stays in the store forever. `sp-balance` marks it and
-spending ignores it, but nothing removes it.
+**Animated QR from computer to device.** `--qr` now selects largest-first, so a
+transaction uses the fewest inputs it can and the frame stays readable. That is
+a smaller budget than it needs to be: the device's decoder already handles
+multi-part input, and only this side is still single-frame.
 
 **Labels.** BIP-352 labelled addresses. The scanner passes an empty label map
 today, which is correct for one published code and wrong the moment there are

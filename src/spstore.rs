@@ -192,6 +192,26 @@ pub fn contains(connection: &Connection, outpoint: OutPoint) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// Remove an output that turned out never to have existed.
+///
+/// A payment matched in the mempool by `sp-scan --tx` is stored before it is
+/// mined, and if that transaction is replaced it is never mined at all. The row
+/// stays regardless: the watermark only walks forward, so nothing revisits it,
+/// and it inflates every balance printed afterwards.
+///
+/// Only ever called for a row the chain says is absent, and only when the store
+/// itself recorded it as unconfirmed. A confirmed output that a backend cannot
+/// currently see is a backend problem, not a coin that vanished.
+pub fn forget(connection: &Connection, outpoint: OutPoint) -> Result<()> {
+    connection
+        .execute(
+            "DELETE FROM kiss_sp_outputs WHERE txid = ?1 AND vout = ?2",
+            params![outpoint.txid.to_string(), outpoint.vout],
+        )
+        .context("removing a silent payment output that was never mined")?;
+    Ok(())
+}
+
 /// The last height searched, if any.
 pub fn watermark(connection: &Connection) -> Result<Option<u32>> {
     connection
@@ -315,5 +335,32 @@ mod tests {
         assert_eq!(watermark(&connection).unwrap(), Some(318_745));
         set_watermark(&mut connection, 318_800).unwrap();
         assert_eq!(watermark(&connection).unwrap(), Some(318_800));
+    }
+
+    #[test]
+    fn forgetting_removes_only_the_output_named() {
+        let mut connection = connection();
+        put_found(
+            &mut connection,
+            &[
+                found_fixture(0, crate::spscan::UNCONFIRMED),
+                found_fixture(1, 200),
+            ],
+        )
+        .unwrap();
+        assert_eq!(outputs(&connection).unwrap().len(), 2);
+
+        let replaced = OutPoint::new(Txid::all_zeros(), 0);
+        forget(&connection, replaced).unwrap();
+
+        let left = outputs(&connection).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].outpoint.vout, 1, "the mined one must survive");
+    }
+
+    #[test]
+    fn forgetting_something_absent_is_not_an_error() {
+        let connection = connection();
+        forget(&connection, OutPoint::new(Txid::all_zeros(), 7)).unwrap();
     }
 }
