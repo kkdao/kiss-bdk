@@ -269,3 +269,17 @@ throwaway test values, so the payment can be checked from the receiving side
 too: deriving from that scan key reproduces the broadcast output script
 `tb1p74frpnrdrq2mt09xdnrje0ewvctp4g2wzra0a8xpdmuc3lhuafast97k48`.
 
+Closing the loop, a received silent payment was then spent back out over the
+same hardware on Mutinynet. The coordinator built a BIP-376 PSBTv2 carrying the
+output's tweak, KISS signed with its spend key plus that tweak, and the
+coordinator verified the returned Schnorr signature against the key it had
+re-derived for itself before finalizing it:
+
+[3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80](https://mutinynet.com/tx/3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80)
+
+Its single input is the silent payment output of
+[10aa6d1e265e24d07af34d722e86ac2e70bbd17c44a5c3704ad1c1e9677c562b](https://mutinynet.com/tx/10aa6d1e265e24d07af34d722e86ac2e70bbd17c44a5c3704ad1c1e9677c562b),
+spent as a `v1_p2tr` key path with one 64-byte signature — the shape a BIP-376
+spend has to have, since the key is `spend + tweak` and no taproot tweak is
+applied on top of it.
+
