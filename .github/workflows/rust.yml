@@ -83,6 +83,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # Run the tool rather than the action wrapping it. The wrapper reports by
+      # creating a check run, which needs a write-scoped token it is not given
+      # on a fork's pull request, so it fails on the report rather than on the
+      # audit. A non-zero exit and the log say the same thing and need nothing.
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
