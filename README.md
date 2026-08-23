@@ -12,6 +12,21 @@ keys. They only ever talk in QR codes.
 
 `Pair` → `Sync` → `Build` → `Sign` → `Verify` → `Broadcast`
 
+## 🧩 Who does what
+
+Silent payments are not one library's job, which is worth knowing before
+reading further:
+
+| | |
+| --- | --- |
+| **BDK** (`bdk_wallet`) | the wallet: descriptors, addresses, coin selection, fees, change, building and finalizing PSBTs |
+| **`bdk_sp`** | the BIP-352 maths: deriving a silent payment output, and testing a block's tweaks against a scan key |
+| **this repo** | the parts neither covers: the BIP-375 and BIP-376 PSBT fields, verifying what comes back, the QR transport, and the clients that fetch tweaks |
+| **the signing device** | the keys. It derives each silent payment output script, because only the input private keys can |
+| **a tweak source** | per-block data no ordinary block explorer serves. A [BlindBit] oracle, or a node of your own |
+
+BDK is not the server and not the signer.
+
 ## 📦 Install
 
 macOS and Linux. You need Rust, a C compiler, and a webcam for the QR steps.
@@ -156,8 +171,14 @@ be asked at all. Each tweak arrives already attached to its transaction, so
 **scanning fetches no blocks**. On signet that was 46 s against BlindBit's
 5 m 23 s.
 
-It serves nothing until fully synced: signet cost 19 GB, about 1½ hours to sync
-and 18 minutes to index. `--network regtest` comes up in seconds.
+**Storage.** A full archive, because rbitcoin does not prune: **signet is 19 GB**,
+about 1½ hours to sync and 18 more to index, measured on an Apple-silicon
+laptop. Mainnet is far larger and out of scope here. `--network regtest` needs
+almost nothing and comes up in seconds.
+
+It also serves nothing until fully synced: both listeners stay closed during
+sync and the tweak index is built after it, so there is no partial-chain
+shortcut.
 
 Silent payments run entirely against that node, scanning and the on-chain amount
 checks alike. The *ordinary* wallet cannot yet: `sync` reads block headers, and

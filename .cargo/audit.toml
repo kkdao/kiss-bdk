@@ -1,0 +1,21 @@
+# Advisories that cannot be fixed from this repository.
+#
+# All three are in rustls-webpki 0.101.7, which arrives under minreq 2.14.1,
+# which esplora-client 0.12.3 pins. minreq 3.0 carries a current rustls, but
+# nothing here can make esplora-client take it, so the fix is an upstream bump
+# rather than a change on this side.
+#
+# Listed one by one on purpose: a new advisory still fails the build. Delete
+# these the moment esplora-client moves.
+#
+# Impact here is narrow but not nothing: all three are certificate validation
+# bugs in the TLS client that talks to Esplora. This coordinator already treats
+# every backend answer as untrusted -- amounts are checked against the chain,
+# signatures against keys computed locally -- so a bad answer is caught rather
+# than believed. That is a reason it is survivable, not a reason it is fine.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0098",  # rustls-webpki: URI name constraints wrongly accepted
+    "RUSTSEC-2026-0099",  # rustls-webpki: wildcard name constraints wrongly accepted
+    "RUSTSEC-2026-0104",  # rustls-webpki: panic parsing a certificate revocation list
+]
