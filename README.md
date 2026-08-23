@@ -327,6 +327,15 @@ Every flow below ran over the physical hardware.
   ([e6543ce2…2dd18560](https://mempool.space/signet/tx/e6543ce27be85b688e57dd57d75de92450ecbb138c5ea443e0d0de6a2dd18560),
   block 319014) as a `v1_p2tr` key-path input with one 64-byte witness item.
 
+- **Silent payment change**, Signet, with both halves in one transaction:
+  [56458880…e7cad3f1](https://mempool.space/signet/tx/564588801141c52bd412a69ac6b08af843724f66cbe20f75cc443436e7cad3f1),
+  block 319035. BIP-376 on the input, BIP-375 on **both** outputs, paying this
+  wallet's own code so the two carry the same recipient and the signer assigns
+  them different derivation orders. On chain: a `v1_p2tr` key-path input with
+  one 64-byte witness item, and two `v1_p2tr` outputs, no ordinary address
+  anywhere. `sp-scan` then found both again, so the change stayed in the
+  keyspace it came from.
+
 Scanning the same signet range through that node and through the public BlindBit
 oracle finds the same output: same outpoint, same amount, same block. Two
 independent sources agreeing is the check that matters; 46 s against 5 m 23 s is
