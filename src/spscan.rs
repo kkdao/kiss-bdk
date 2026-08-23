@@ -20,8 +20,11 @@ use anyhow::{Context, Result, bail};
 use bdk_sp::compute_shared_secret;
 use bdk_sp::receive::SpOut;
 use bdk_sp::receive::scan::Scanner;
-use bdk_wallet::bitcoin::secp256k1::PublicKey;
-use bdk_wallet::bitcoin::{Block, ScriptBuf, Transaction, TxOut};
+use bdk_wallet::bitcoin::key::TweakedPublicKey;
+use bdk_wallet::bitcoin::secp256k1::{PublicKey, XOnlyPublicKey};
+use bdk_wallet::bitcoin::{
+    Amount, Block, ScriptBuf, Transaction, TxOut, Txid, absolute, transaction,
+};
 
 use crate::spreceive::ScanKeys;
 
@@ -30,6 +33,31 @@ use crate::spreceive::ScanKeys;
 pub struct Found {
     pub height: u32,
     pub out: SpOut,
+}
+
+/// One taproot output a candidate transaction created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaprootOut {
+    pub vout: u32,
+    pub key: XOnlyPublicKey,
+    pub amount: Amount,
+}
+
+/// A transaction a tweak stream flagged, with everything a match needs.
+///
+/// This is what [`electrum`](crate::electrum) publishes and BlindBit does not:
+/// the tweak arrives already attached to the transaction it belongs to, along
+/// with the taproot outputs that transaction created. That is the whole of what
+/// [`scan_candidate`] looks at, which is why scanning this way needs no blocks.
+///
+/// It is a claim, not a fact. The tweak is checked by re-deriving from it, so a
+/// wrong one simply fails to match — but `amount` is only ever the server's
+/// word, and a caller that stores it must check it against the chain first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub txid: Txid,
+    pub tweak: PublicKey,
+    pub outputs: Vec<TaprootOut>,
 }
 
 /// Build the scanner for a wallet's keys.
@@ -115,6 +143,72 @@ pub fn scan_block(
         found.extend(outs.into_iter().map(|out| Found { height, out }));
     }
     Ok(found)
+}
+
+/// Search one flagged transaction without fetching it.
+///
+/// [`scan_block`] needs the block because a bare tweak does not say which
+/// transaction it belongs to. A [`Candidate`] does, and carries that
+/// transaction's taproot outputs with it, so the same test can be run against
+/// nothing but the stream.
+///
+/// `bdk_sp` takes a whole transaction, and takes each outpoint from its own
+/// walk of the outputs — so it gets one built from the candidate. Only taproot
+/// outputs are published and only taproot outputs are looked at, which makes
+/// that reconstruction exact rather than approximate: every output the real
+/// transaction would have contributed is present, at the index it really has,
+/// and the gaps between them are filled with something that cannot be mistaken
+/// for one. The synthetic transaction's own txid is meaningless and is replaced
+/// by the published one afterwards.
+pub fn scan_candidate(
+    keys: &ScanKeys,
+    scanner: &Scanner,
+    candidate: &Candidate,
+    height: u32,
+) -> Result<Vec<Found>> {
+    let Some(width) = candidate.outputs.iter().map(|out| out.vout).max() else {
+        return Ok(Vec::new());
+    };
+    let width = width as usize + 1;
+
+    let mut output = vec![
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::new(),
+        };
+        width
+    ];
+    for out in &candidate.outputs {
+        output[out.vout as usize] = TxOut {
+            value: out.amount,
+            // Already an output key: it is on the chain, so whatever tweak it
+            // carries is baked in and must not be applied again.
+            script_pubkey: ScriptBuf::new_p2tr_tweaked(
+                TweakedPublicKey::dangerous_assume_tweaked(out.key),
+            ),
+        };
+    }
+
+    let shared = compute_shared_secret(&keys.scan, &candidate.tweak);
+    let outs = scanner
+        .scan_txouts(
+            &Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output,
+            },
+            shared,
+        )
+        .with_context(|| format!("scanning {} at height {height}", candidate.txid))?;
+
+    Ok(outs
+        .into_iter()
+        .map(|mut out| {
+            out.outpoint.txid = candidate.txid;
+            Found { height, out }
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -210,5 +304,155 @@ mod tests {
         assert_eq!(found[0].height, 7);
         assert_eq!(found[0].out.script_pubkey, spk);
         assert_eq!(found[0].out.amount, Amount::from_sat(10_000));
+    }
+
+    /// A candidate built from a transaction the block scan also sees, so the
+    /// two paths can be held against each other rather than each against a
+    /// hand-written expectation.
+    fn candidate_for(tx: &Transaction, tweak: PublicKey) -> Candidate {
+        let txid = tx.compute_txid();
+        Candidate {
+            txid,
+            tweak,
+            outputs: tx
+                .output
+                .iter()
+                .enumerate()
+                .filter(|(_, out)| out.script_pubkey.is_p2tr())
+                .map(|(vout, out)| TaprootOut {
+                    vout: vout as u32,
+                    key: XOnlyPublicKey::from_slice(&out.script_pubkey.as_bytes()[2..]).unwrap(),
+                    amount: out.value,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_candidate_with_no_taproot_outputs_is_skipped() {
+        let keys = keys();
+        let secp = Secp256k1::new();
+        let candidate = Candidate {
+            txid: Txid::all_zeros(),
+            tweak: SecretKey::from_slice(&[0x33; 32])
+                .unwrap()
+                .public_key(&secp),
+            outputs: Vec::new(),
+        };
+        assert!(
+            scan_candidate(&keys, &scanner(&keys), &candidate, 1)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn scanning_a_candidate_finds_what_scanning_the_block_finds() {
+        let keys = keys();
+        let secp = Secp256k1::new();
+        let tweak = SecretKey::from_slice(&[0x33; 32])
+            .unwrap()
+            .public_key(&secp);
+        let scanner = scanner(&keys);
+
+        // The payment sits at index 2, behind two outputs that are not taproot
+        // at all. If the reconstruction shifted it, the outpoint would be wrong
+        // and the coin unspendable.
+        let spk = scanner.get_spks_from_tweak(&tweak, 0).remove(0);
+        let filler = TxOut {
+            value: Amount::from_sat(546),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x00, 0x14, 0xAB]),
+        };
+        let block = block_with(vec![
+            filler.clone(),
+            filler,
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: spk.clone(),
+            },
+        ]);
+        let tx = &block.txdata[0];
+
+        let from_block = scan_block(&keys, &scanner, &[tweak], &block, 9).unwrap();
+        let from_candidate =
+            scan_candidate(&keys, &scanner, &candidate_for(tx, tweak), 9).unwrap();
+
+        assert_eq!(from_block.len(), 1);
+        assert_eq!(from_candidate.len(), 1, "the stream must find it too");
+        assert_eq!(from_candidate[0].out.outpoint, from_block[0].out.outpoint);
+        assert_eq!(from_candidate[0].out.outpoint.vout, 2);
+        assert_eq!(from_candidate[0].out.script_pubkey, spk);
+        assert_eq!(from_candidate[0].out.amount, Amount::from_sat(10_000));
+        assert_eq!(
+            from_candidate[0].out.tweak.secret_bytes(),
+            from_block[0].out.tweak.secret_bytes(),
+            "the spending tweak is the thing the coin cannot be moved without"
+        );
+    }
+
+    #[test]
+    fn two_payments_in_one_transaction_both_come_back() {
+        let keys = keys();
+        let secp = Secp256k1::new();
+        let tweak = SecretKey::from_slice(&[0x33; 32])
+            .unwrap()
+            .public_key(&secp);
+        let scanner = scanner(&keys);
+
+        // Derivation order 1 only exists once order 0 has matched, which is the
+        // case a narrowing pass on its own would miss.
+        let first = scanner.get_spks_from_tweak(&tweak, 0).remove(0);
+        let second = scanner.get_spks_from_tweak(&tweak, 1).remove(0);
+        let block = block_with(vec![
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: first,
+            },
+            TxOut {
+                value: Amount::from_sat(20_000),
+                script_pubkey: second,
+            },
+        ]);
+
+        let found = scan_candidate(
+            &keys,
+            &scanner,
+            &candidate_for(&block.txdata[0], tweak),
+            9,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            found.iter().map(|f| f.out.amount.to_sat()).sum::<u64>(),
+            30_000
+        );
+    }
+
+    #[test]
+    fn a_candidate_whose_outputs_are_not_ours_finds_nothing() {
+        let keys = keys();
+        let secp = Secp256k1::new();
+        let tweak = SecretKey::from_slice(&[0x33; 32])
+            .unwrap()
+            .public_key(&secp);
+        // A real taproot key, just not one this wallet's tweak derives.
+        let stranger = SecretKey::from_slice(&[0x44; 32])
+            .unwrap()
+            .x_only_public_key(&secp)
+            .0;
+        let candidate = Candidate {
+            txid: Txid::all_zeros(),
+            tweak,
+            outputs: vec![TaprootOut {
+                vout: 0,
+                key: stranger,
+                amount: Amount::from_sat(10_000),
+            }],
+        };
+        assert!(
+            scan_candidate(&keys, &scanner(&keys), &candidate, 1)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

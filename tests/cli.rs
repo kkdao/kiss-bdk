@@ -101,7 +101,9 @@ fn init_records_the_chosen_network_and_its_default_backend() {
 fn rejects_mainnet_and_unknown_networks() {
     let tmp = tempfile::tempdir().unwrap();
     let wallet_dir = tmp.path().join("wallet");
-    for network in ["bitcoin", "mainnet", "regtest"] {
+    // Regtest is not in this list any more: it is a chain you run yourself, so
+    // it carries none of the risk mainnet does. Mainnet stays refused.
+    for network in ["bitcoin", "mainnet", "testnet3"] {
         let (ok, _, _) = run(
             &wallet_dir,
             &[
@@ -114,6 +116,25 @@ fn rejects_mainnet_and_unknown_networks() {
         );
         assert!(!ok, "init accepted --network {network}");
     }
+}
+
+#[test]
+fn initializes_a_regtest_wallet_against_a_local_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    init_watch_only(&wallet_dir, "regtest");
+
+    let (ok, stdout, stderr) = run(&wallet_dir, &["address"]);
+    assert!(ok, "{stderr}");
+    // Same descriptor, same keys — but regtest says so in the address, which is
+    // what stops a regtest coin being confused for a testnet one.
+    assert!(stdout.contains("bcrt1"), "{stdout}");
+
+    // No faucet exists for a chain of your own, and the command should say how
+    // to get coins rather than point at a website that cannot help.
+    let (ok, stdout, stderr) = run(&wallet_dir, &["faucet", "--sats", "10000"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("generatetodescriptor"), "{stdout}");
 }
 
 #[test]

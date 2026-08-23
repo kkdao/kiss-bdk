@@ -29,13 +29,15 @@ Chosen at `init` and fixed for the life of that wallet directory.
 | `testnet4` (default) | `https://mempool.space/testnet4/api` | browser only |
 | `signet` | `https://mempool.space/signet/api` | browser only |
 | `mutinynet` | `https://mutinynet.com/api` | `kiss-bdk faucet --token …` |
+| `regtest` | `http://127.0.0.1:3000` | mine to the address |
 
-All three are BIP-44 coin type `1h`, so one KISS descriptor derives the same
-addresses on all of them — which also means a `tb1…` address is valid on every
-one and nothing can tell them apart. Keep one `--wallet-dir` per network.
+All four are BIP-44 coin type `1h`, so one KISS descriptor derives the same
+addresses on all of them. On the first three that also means a `tb1…` address is
+valid on every one and nothing can tell them apart; regtest says `bcrt1…`, which
+is the only one that cannot be mistaken. Keep one `--wallet-dir` per network.
 
 Mutinynet's blocks are ~30 seconds apart, so it is the one to demo on. Mainnet
-and regtest are not selectable. Override the backend with `--esplora URL`.
+is not selectable. Override the backend with `--esplora URL`.
 
 ## Quick start
 
@@ -98,6 +100,31 @@ will not serve — so tweaks come from a [BlindBit] server and are matched
 locally. The server learns which blocks you scanned, never which outputs
 matched.
 
+#### From a node of your own
+
+```sh
+kiss-bdk sp-scan --electrum 127.0.0.1:50001
+```
+
+[rbitcoin] indexes the same tweaks and serves them over the Electrum protocol,
+so nobody has to be asked at all. Run it with `--shindex --sptweaks
+--electrum-listen`, and point `--esplora` at its `--esplora-listen` too if you
+want the whole wallet off other people's servers.
+
+This is also faster, and not only because it is local. BlindBit publishes a bare
+list of tweaks, so finding which transaction each belongs to means fetching the
+whole block; the Electrum stream sends each tweak already attached to its txid
+and to that transaction's taproot outputs, which is the whole of what the match
+needs. **Scanning this way fetches no blocks.**
+
+Amounts are still not taken on trust. A tweak needs none — it either re-derives
+the output key or it does not — but a value is stored, and later becomes the
+`witness_utxo` of the BIP-376 spend that moves the coin, which BIP-341 signs
+over. A wrong one is a valid signature over a lie. Reading the block settles
+that as a side effect; reading a stream does not, so every *found* output is
+checked against the chain before it is stored: one pair of requests per payment,
+rather than one block per height.
+
 `sp-pair` reads KISS's **SCAN KEY** export: the scan private key, never the
 spend key. This coordinator can see payments and can never move them. It is the
 only secret the wallet directory holds, and mainnet is unreachable here, so it
@@ -133,6 +160,7 @@ keyspace needs BIP-376 inputs and BIP-375 outputs in one PSBT — the signer
 supports that shape, this does not yet.
 
 [BlindBit]: https://github.com/setavenger/blindbit-oracle
+[rbitcoin]: https://github.com/reardencode/rbitcoin
 
 ## Topping up
 
@@ -179,3 +207,25 @@ Every flow below ran over the physical hardware.
   One `v1_p2tr` key-path input, one 64-byte signature — the shape a BIP-376
   spend must have, since the key is `spend + tweak` with no taproot tweak on
   top.
+
+The tweak stream is proven differently, because it needs no signer and no
+hardware — but it does need a node, and the node only serves Electrum once it
+has caught up to its peers, which for a signet archive is tens of gigabytes.
+So it is proven against a chain that reaches its tip immediately, and every part
+under test is the same code:
+[tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) mines a coinbase, spends
+it to a real BIP-352 output derived from the sender's own input key, and then —
+knowing only the recipient's keys — finds it again through
+`blockchain.tweaks.subscribe` on a live [rbitcoin] (`master` at `a5ce3b1`,
+`--shindex --sptweaks`). It also checks the node's published tweak against
+`input_hash · A` computed here, runs the whole thing a second time through the
+`sp-scan` command itself, and confirms a wallet on the wrong chain is refused.
+
+```text
+scanning 611 to 611 via 127.0.0.1:50002...
+found 4999999000 sats at b428b1a8…af05a56d:0 in block 611
+scanned to 611; 1 silent payment output(s) in range
+```
+
+Signet is the next step and needs no new code — only the disk for a full
+archive.

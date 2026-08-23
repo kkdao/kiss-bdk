@@ -17,6 +17,7 @@ use bdk_wallet::miniscript::descriptor::{DescriptorPublicKey, checksum};
 
 pub mod blindbit;
 pub mod dleq;
+pub mod electrum;
 mod k_quirc;
 pub mod qr;
 pub mod sp;

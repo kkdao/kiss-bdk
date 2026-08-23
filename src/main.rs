@@ -11,12 +11,13 @@ use bdk_esplora::esplora_client::{BlockingClient, Builder};
 use bdk_wallet::bitcoin::address::NetworkUnchecked;
 use bdk_wallet::bitcoin::bip32::KeySource;
 use bdk_wallet::bitcoin::secp256k1::PublicKey;
-use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt, Sequence};
+use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt, Sequence, constants};
 use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 use clap::{Parser, Subcommand, ValueEnum};
 use kiss_bdk::blindbit;
+use kiss_bdk::electrum;
 use kiss_bdk::qr::{render_psbt_bytes_png, scan_descriptor, scan_scan_key, scan_signed_psbt_bytes};
 use kiss_bdk::sp::{self, SilentPaymentAddress};
 use kiss_bdk::spreceive;
@@ -66,6 +67,9 @@ enum Chain {
     Signet,
     #[value(name = "mutinynet")]
     Mutinynet,
+    /// A chain of your own, on a node of your own.
+    #[value(name = "regtest")]
+    Regtest,
 }
 
 impl Chain {
@@ -75,6 +79,7 @@ impl Chain {
             // Mutinynet is a custom signet: same address format and same genesis
             // block as the default signet, but its own separate chain.
             Chain::Signet | Chain::Mutinynet => Network::Signet,
+            Chain::Regtest => Network::Regtest,
         }
     }
 
@@ -83,6 +88,10 @@ impl Chain {
             Chain::Testnet4 => "https://mempool.space/testnet4/api",
             Chain::Signet => "https://mempool.space/signet/api",
             Chain::Mutinynet => "https://mutinynet.com/api",
+            // The only chain whose default backend is not somebody else's:
+            // regtest exists nowhere but on the machine running it, so the
+            // default is rbitcoin's own `--esplora-listen`.
+            Chain::Regtest => "http://127.0.0.1:3000",
         }
     }
 
@@ -95,7 +104,9 @@ impl Chain {
     fn default_blindbit(self) -> Option<&'static str> {
         match self {
             Chain::Signet => Some("https://silentpayments.dev/blindbit/signet"),
-            Chain::Testnet4 | Chain::Mutinynet => None,
+            // Regtest has no published anything. Its tweaks come from the
+            // same node serving its blocks, over --electrum.
+            Chain::Testnet4 | Chain::Mutinynet | Chain::Regtest => None,
         }
     }
 
@@ -104,6 +115,7 @@ impl Chain {
             Chain::Testnet4 => "Testnet4",
             Chain::Signet => "Signet",
             Chain::Mutinynet => "Mutinynet (custom signet)",
+            Chain::Regtest => "Regtest (local)",
         }
     }
 
@@ -115,6 +127,7 @@ impl Chain {
                 "https://signetfaucet.com/",
             ]),
             Chain::Testnet4 => FaucetKind::Manual(&["https://mempool.space/testnet4/faucet"]),
+            Chain::Regtest => FaucetKind::Mined,
         }
     }
 
@@ -123,6 +136,7 @@ impl Chain {
         match network {
             Network::Testnet4 => Some(Chain::Testnet4),
             Network::Signet => Some(Chain::Signet),
+            Network::Regtest => Some(Chain::Regtest),
             _ => None,
         }
     }
@@ -134,6 +148,8 @@ enum FaucetKind {
     Api,
     /// Browser-only: the public faucets are all captcha-protected.
     Manual(&'static [&'static str]),
+    /// No faucet exists, because the chain is yours: mine to the address.
+    Mined,
 }
 
 #[derive(Debug, Parser)]
@@ -276,7 +292,7 @@ enum Command {
         /// Check one transaction instead of walking the chain. Works before it
         /// is mined, since the tweak is derived here rather than read from the
         /// oracle, which only publishes for blocks it has indexed.
-        #[arg(long, value_name = "TXID", conflicts_with_all = ["from", "blindbit"])]
+        #[arg(long, value_name = "TXID", conflicts_with_all = ["from", "blindbit", "electrum"])]
         tx: Option<String>,
 
         /// First block to search. Defaults to continuing where the last scan
@@ -284,9 +300,16 @@ enum Command {
         #[arg(long)]
         from: Option<u32>,
 
-        /// Tweak oracle to read, overriding the chain's default.
-        #[arg(long)]
+        /// BlindBit tweak oracle to read, overriding the chain's default.
+        #[arg(long, value_name = "URL")]
         blindbit: Option<String>,
+
+        /// Read tweaks from a node of your own over the Electrum protocol
+        /// instead — `rbitcoin --sptweaks --electrum-listen`, or anything else
+        /// answering `blockchain.tweaks.subscribe`. Scanning this way fetches
+        /// no blocks, because each tweak arrives with its transaction.
+        #[arg(long, value_name = "HOST:PORT", conflicts_with = "blindbit")]
+        electrum: Option<String>,
     },
 
     /// Show the silent payment outputs found so far.
@@ -369,9 +392,14 @@ fn main() -> Result<()> {
             camera,
         } => sp_pair(&cli.wallet_dir, scan_qr, key, camera),
         Command::SpAddress => sp_address(&cli.wallet_dir),
-        Command::SpScan { tx, from, blindbit } => match tx {
+        Command::SpScan {
+            tx,
+            from,
+            blindbit,
+            electrum,
+        } => match tx {
             Some(txid) => sp_scan_tx(&cli.wallet_dir, &txid),
-            None => sp_scan(&cli.wallet_dir, from, blindbit),
+            None => sp_scan(&cli.wallet_dir, from, blindbit, electrum),
         },
         Command::SpBalance => sp_balance(&cli.wallet_dir),
         Command::Inspect { psbt } => inspect_psbt(&psbt),
@@ -633,13 +661,22 @@ fn sp_scan_tx(wallet_dir: &Path, txid: &str) -> Result<()> {
 }
 
 /// Search the chain for payments to this wallet's silent payment address.
-fn sp_scan(wallet_dir: &Path, from: Option<u32>, blindbit_url: Option<String>) -> Result<()> {
+fn sp_scan(
+    wallet_dir: &Path,
+    from: Option<u32>,
+    blindbit_url: Option<String>,
+    electrum_address: Option<String>,
+) -> Result<()> {
+    if let Some(address) = electrum_address {
+        return sp_scan_electrum(wallet_dir, from, &address);
+    }
+
     let (config, chain) = load_config(wallet_dir)?;
     let url = blindbit_url
         .or_else(|| chain.default_blindbit().map(str::to_string))
         .with_context(|| {
             format!(
-                "no tweak oracle is known for {}; pass --blindbit URL",
+                "no tweak oracle is known for {}; pass --blindbit URL or --electrum HOST:PORT",
                 chain.label()
             )
         })?;
@@ -715,6 +752,136 @@ fn sp_scan(wallet_dir: &Path, from: Option<u32>, blindbit_url: Option<String>) -
     // Not "new": a rescan of the same range finds the same outputs again, and
     // storing them is idempotent. Counting them as new would misreport that.
     println!("scanned to {tip}; {total} silent payment output(s) in range");
+    Ok(())
+}
+
+/// Search the chain against a node of your own, over the Electrum tweak stream.
+///
+/// The same scan as above with a different source, and one difference that is
+/// visible from the outside: no blocks are fetched. A tweak arrives already
+/// attached to its transaction and to the taproot outputs that transaction
+/// created, which is the whole of what the match needs — so a range of empty
+/// heights costs one streamed line each and nothing else.
+fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Result<()> {
+    let (config, chain) = load_config(wallet_dir)?;
+    let (mut connection, _wallet) = open_wallet(wallet_dir, &config, chain)?;
+    spstore::migrate(&mut connection)?;
+    let keys = spstore::keys(&connection)?
+        .context("no silent payment keys; run sp-pair with KISS's export first")?;
+
+    let mut server = electrum::Electrum::connect(address)?;
+
+    // Heights mean different things on different chains, and a server that
+    // answers confidently about the wrong one produces a scan that finds
+    // nothing and reports that as though it had looked.
+    let expected = constants::genesis_block(chain.network()).block_hash();
+    let genesis = server.genesis_hash()?;
+    if genesis != expected {
+        bail!(
+            "the server at {address} is on the chain whose genesis is {genesis}, \
+             but this wallet is on {} ({expected})",
+            chain.label()
+        );
+    }
+
+    // The server's own tip, not the chain's: scanning past what it has is how a
+    // payment gets skipped without anything saying so.
+    let tip = server.tip_height()?;
+    let start = match from.or_else(|| spstore::watermark(&connection).ok().flatten()) {
+        Some(height) => height,
+        // A wallet that has never scanned has no history worth walking; a
+        // full-chain scan should be an explicit --from, not a surprise.
+        None => tip,
+    };
+    if start > tip {
+        bail!("the server has only reached {tip}, below the requested start {start}");
+    }
+
+    let scanner = spscan::scanner(&keys);
+    let esplora = esplora(&config);
+    println!("scanning {start} to {tip} via {address}...");
+
+    let mut total = 0_usize;
+    let mut last = None;
+    let count = tip - start + 1;
+    server.tweaks(start, count, |height, candidates| {
+        for candidate in &candidates {
+            let found = spscan::scan_candidate(&keys, &scanner, candidate, height)?;
+            for item in &found {
+                // The stream is trusted for which transactions to look at — a
+                // wrong tweak just fails to match — but never for what they
+                // paid. See `confirm_on_chain`.
+                confirm_on_chain(&esplora, item)?;
+                println!(
+                    "found {} sats at {} in block {height}",
+                    item.out.amount.to_sat(),
+                    item.out.outpoint
+                );
+            }
+            total += found.len();
+            spstore::put_found(&mut connection, &found)?;
+        }
+        spstore::set_watermark(&mut connection, height)?;
+        last = Some(height);
+        Ok(())
+    })?;
+
+    match last {
+        Some(height) => {
+            println!("scanned to {height}; {total} silent payment output(s) in range");
+            Ok(())
+        }
+        // The stream ended without delivering the height it was asked for.
+        // Reporting a clean scan here would move the watermark's meaning from
+        // "searched" to "asked about".
+        None => bail!("the server at {address} sent no heights for {start} to {tip}"),
+    }
+}
+
+/// Confirm a found output exists on chain exactly as it was published.
+///
+/// A tweak needs no trust: it either re-derives the output key or it does not.
+/// An *amount* does. It is stored, and later becomes the `witness_utxo` of the
+/// BIP-376 spend that moves the coin — which BIP-341 signs over. A wrong one is
+/// a valid signature over a lie, discovered as a rejected broadcast after a
+/// walk to the device and back.
+///
+/// Reading the block, the way a BlindBit scan does, settles that as a side
+/// effect. Reading a stream does not, so it is settled here instead: one pair
+/// of requests per payment found, rather than one block per height.
+fn confirm_on_chain(esplora: &BlockingClient, found: &spscan::Found) -> Result<()> {
+    let outpoint = found.out.outpoint;
+    let tx = esplora
+        .get_tx(&outpoint.txid)
+        .with_context(|| format!("checking {outpoint} against the chain"))?
+        .with_context(|| format!("{} is not in the chain the backend serves", outpoint.txid))?;
+
+    let txout = tx
+        .output
+        .get(outpoint.vout as usize)
+        .with_context(|| format!("{outpoint} is past the end of its transaction"))?;
+    if txout.script_pubkey != found.out.script_pubkey {
+        bail!("{outpoint} does not pay the script the tweak server published");
+    }
+    if txout.value != found.out.amount {
+        bail!(
+            "{outpoint} holds {} on chain, not the {} the tweak server published",
+            txout.value,
+            found.out.amount
+        );
+    }
+
+    let status = esplora
+        .get_tx_status(&outpoint.txid)
+        .with_context(|| format!("checking where {} was mined", outpoint.txid))?;
+    if status.block_height != Some(found.height) {
+        bail!(
+            "the tweak server placed {} in block {}, the chain in {:?}",
+            outpoint.txid,
+            found.height,
+            status.block_height
+        );
+    }
     Ok(())
 }
 
@@ -800,6 +967,13 @@ fn faucet(
             request_mutinynet_coins(&address, sats, &token)?;
         }
         FaucetKind::Manual(urls) => print_manual_faucet(chain, sats, urls),
+        FaucetKind::Mined => {
+            println!("regtest has no faucet — mine to this address instead:");
+            println!(
+                "  rbitcoin-cli --datadir DIR generatetodescriptor 101 'addr({address})'"
+            );
+            println!("101 blocks, because a coinbase matures 100 blocks after the one paying it.");
+        }
     }
     println!("next: kiss-bdk --wallet-dir {} sync", wallet_dir.display());
     Ok(())
