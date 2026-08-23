@@ -84,11 +84,11 @@ fn standard(method: &str, id: u64) -> Option<Vec<String>> {
     match method {
         "server.features" => Some(vec![result(
             id,
-            &format!(r#"{{"genesis_hash":"{SIGNET_GENESIS}","server_version":"rbitcoin-electrs"}}"#),
+            &format!(
+                r#"{{"genesis_hash":"{SIGNET_GENESIS}","server_version":"rbitcoin-electrs"}}"#
+            ),
         )]),
-        "blockchain.headers.subscribe" => {
-            Some(vec![result(id, r#"{"height":102,"hex":"00"}"#)])
-        }
+        "blockchain.headers.subscribe" => Some(vec![result(id, r#"{"height":102,"hex":"00"}"#)]),
         _ => None,
     }
 }
@@ -241,11 +241,7 @@ fn a_failing_callback_stops_the_scan() {
             return canned;
         }
         let _ = sent.send(());
-        vec![
-            result(id, r#"{"100":{}}"#),
-            notify(r#"{"101":{}}"#),
-            done(),
-        ]
+        vec![result(id, r#"{"100":{}}"#), notify(r#"{"101":{}}"#), done()]
     });
 
     let error = Electrum::connect(&address)

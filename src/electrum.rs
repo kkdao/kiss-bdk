@@ -101,7 +101,8 @@ impl Electrum {
             .get("genesis_hash")
             .and_then(Value::as_str)
             .context("the server's features carry no genesis_hash")?;
-        BlockHash::from_str(hex).with_context(|| format!("genesis_hash {hex:?} is not a block hash"))
+        BlockHash::from_str(hex)
+            .with_context(|| format!("genesis_hash {hex:?} is not a block hash"))
     }
 
     /// The highest block the server has.

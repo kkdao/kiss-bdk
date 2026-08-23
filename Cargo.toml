@@ -2,6 +2,9 @@
 name = "kiss-bdk"
 version = "0.1.0"
 edition = "2024"
+# Verified in CI rather than declared: `cargo check` on exactly this toolchain.
+# Edition 2024 needs 1.85, `is_multiple_of` 1.87, and let-chains 1.88.
+rust-version = "1.88"
 description = "Experimental test-network coordinator for the KISS air-gapped signer"
 license = "MIT"
 repository = "https://github.com/kkdao/kiss-bdk"

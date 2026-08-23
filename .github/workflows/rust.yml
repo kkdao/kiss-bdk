@@ -1,0 +1,84 @@
+# Every test in this repository, on both platforms it claims to run on.
+#
+# Most tests need neither a network nor a device: the PSBT contract tests assert
+# on serialized bytes, and the silent payment tests sign and verify offline
+# against keys committed here. The ones that do need something are `#[ignore]`d
+# and say so in their own module comment, so a green run here is a real
+# statement rather than a partial one.
+name: rust
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # `cc` builds the vendored k_quirc decoder. nokhwa's native backend links
+      # v4l on Linux even with no camera attached, and its bindgen step needs
+      # libclang, which is not on the runner by default.
+      - name: Install build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libv4l-dev libclang-dev clang
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # Warnings differ by platform: the camera backend compiles a different
+      # path on each, so dead code on one is live on the other.
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release
+        run: cargo build --release --locked
+
+  # `rust-version` is a promise, and an unchecked promise is how a crate ends up
+  # declaring a floor it cannot build on. Verified rather than asserted.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libv4l-dev libclang-dev clang
+      - name: Read the declared MSRV
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build on the declared MSRV
+        run: cargo check --locked --all-targets
+
+  # A wallet's dependency tree is worth watching even on a test network.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

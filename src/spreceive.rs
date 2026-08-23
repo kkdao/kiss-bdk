@@ -100,9 +100,10 @@ pub fn parse_scan_export(export: &str) -> Result<ScanKeys> {
 /// The lengths are what tells the two apart, so a swapped pair is refused
 /// rather than silently paired to a wallet that can never see a payment.
 pub fn parse_scan_hex(pair: &str) -> Result<ScanKeys> {
-    let (scan, spend) = pair.trim().split_once(':').context(
-        "expected SCAN_PRIVATE_HEX:SPEND_PUBLIC_HEX, 64 hex digits then 66",
-    )?;
+    let (scan, spend) = pair
+        .trim()
+        .split_once(':')
+        .context("expected SCAN_PRIVATE_HEX:SPEND_PUBLIC_HEX, 64 hex digits then 66")?;
 
     let scan = decode_hex(scan.trim()).context("the scan private key is not hex")?;
     let spend = decode_hex(spend.trim()).context("the spend public key is not hex")?;
@@ -308,7 +309,10 @@ mod tests {
     #[test]
     fn raw_hex_tolerates_surrounding_whitespace() {
         let padded = format!("  {}  ", hex_pair().replace(':', " : "));
-        assert_eq!(parse_scan_hex(&padded).unwrap(), parse_scan_hex(&hex_pair()).unwrap());
+        assert_eq!(
+            parse_scan_hex(&padded).unwrap(),
+            parse_scan_hex(&hex_pair()).unwrap()
+        );
     }
 
     /// Both keys are hex of a similar shape, so the only thing standing between

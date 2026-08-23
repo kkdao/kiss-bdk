@@ -183,9 +183,9 @@ pub fn scan_candidate(
             value: out.amount,
             // Already an output key: it is on the chain, so whatever tweak it
             // carries is baked in and must not be applied again.
-            script_pubkey: ScriptBuf::new_p2tr_tweaked(
-                TweakedPublicKey::dangerous_assume_tweaked(out.key),
-            ),
+            script_pubkey: ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(
+                out.key,
+            )),
         };
     }
 
@@ -374,8 +374,7 @@ mod tests {
         let tx = &block.txdata[0];
 
         let from_block = scan_block(&keys, &scanner, &[tweak], &block, 9).unwrap();
-        let from_candidate =
-            scan_candidate(&keys, &scanner, &candidate_for(tx, tweak), 9).unwrap();
+        let from_candidate = scan_candidate(&keys, &scanner, &candidate_for(tx, tweak), 9).unwrap();
 
         assert_eq!(from_block.len(), 1);
         assert_eq!(from_candidate.len(), 1, "the stream must find it too");
@@ -414,13 +413,8 @@ mod tests {
             },
         ]);
 
-        let found = scan_candidate(
-            &keys,
-            &scanner,
-            &candidate_for(&block.txdata[0], tweak),
-            9,
-        )
-        .unwrap();
+        let found =
+            scan_candidate(&keys, &scanner, &candidate_for(&block.txdata[0], tweak), 9).unwrap();
         assert_eq!(found.len(), 2);
         assert_eq!(
             found.iter().map(|f| f.out.amount.to_sat()).sum::<u64>(),

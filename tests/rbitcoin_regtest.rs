@@ -78,10 +78,7 @@ fn sender() -> (SecretKey, PublicKey) {
 
 fn sender_script() -> ScriptBuf {
     let (_, public) = sender();
-    ScriptBuf::new_p2wpkh(
-        &bdk_wallet::bitcoin::CompressedPublicKey(public)
-            .wpubkey_hash(),
-    )
+    ScriptBuf::new_p2wpkh(&bdk_wallet::bitcoin::CompressedPublicKey(public).wpubkey_hash())
 }
 
 fn datadir() -> String {
@@ -90,8 +87,8 @@ fn datadir() -> String {
 }
 
 fn rpc(method: &str, params: Value) -> Value {
-    let cookie = std::fs::read_to_string(format!("{}/.cookie", datadir()))
-        .expect("the node's .cookie file");
+    let cookie =
+        std::fs::read_to_string(format!("{}/.cookie", datadir())).expect("the node's .cookie file");
     let auth = base64::engine::general_purpose::STANDARD.encode(cookie.trim());
 
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
@@ -171,7 +168,11 @@ fn a_fresh_payment() -> Payment {
     let before = tip();
     mine(101);
     let funded = before + 1;
-    assert_eq!(tip(), before + 101, "the node must have mined what was asked");
+    assert_eq!(
+        tip(),
+        before + 101,
+        "the node must have mined what was asked"
+    );
 
     let previous = OutPoint::new(coinbase_of(funded), 0);
     let subsidy = Amount::from_sat(50 * 100_000_000);
@@ -208,10 +209,7 @@ fn a_fresh_payment() -> Payment {
     let sighash = SighashCache::new(&tx)
         .p2wpkh_signature_hash(0, &sender_script(), subsidy, EcdsaSighashType::All)
         .unwrap();
-    let signature = secp.sign_ecdsa(
-        &Message::from_digest(sighash.to_byte_array()),
-        &sender_sk,
-    );
+    let signature = secp.sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &sender_sk);
     let mut serialized = signature.serialize_der().to_vec();
     serialized.push(EcdsaSighashType::All as u8);
     tx.input[0].witness = Witness::from_slice(&[serialized, sender_pk.serialize().to_vec()]);

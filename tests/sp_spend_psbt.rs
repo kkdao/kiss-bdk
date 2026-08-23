@@ -354,8 +354,12 @@ mod silent_payment_change {
     fn code(scan: u8, spend: u8) -> SilentPaymentAddress {
         let secp = Secp256k1::new();
         SilentPaymentAddress {
-            scan: SecretKey::from_slice(&[scan; 32]).unwrap().public_key(&secp),
-            spend: SecretKey::from_slice(&[spend; 32]).unwrap().public_key(&secp),
+            scan: SecretKey::from_slice(&[scan; 32])
+                .unwrap()
+                .public_key(&secp),
+            spend: SecretKey::from_slice(&[spend; 32])
+                .unwrap()
+                .public_key(&secp),
             mainnet: false,
         }
     }

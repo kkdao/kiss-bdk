@@ -8,7 +8,9 @@ use bdk_wallet::bitcoin::Psbt;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Luma};
 use nokhwa::pixel_format::LumaFormat;
-use nokhwa::utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
+#[cfg(any(target_os = "macos", test))]
+use nokhwa::utils::CameraFormat;
+use nokhwa::utils::{CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
 use nokhwa::{Camera, nokhwa_initialize};
 use qrcode::QrCode;
 use qrcode::types::{EcLevel, Version};
@@ -213,6 +215,10 @@ fn open_camera(camera_index: u32) -> Result<Camera> {
         .with_context(|| format!("opening camera {camera_index}"))
 }
 
+/// Only macOS picks a mode by hand: every other backend takes
+/// `RequestedFormatType::None` and negotiates one itself. The tests exercise it
+/// everywhere regardless, which is why this is not simply macOS-only.
+#[cfg(any(target_os = "macos", test))]
 fn choose_camera_format(formats: &[CameraFormat]) -> Option<CameraFormat> {
     formats
         .iter()

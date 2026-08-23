@@ -1122,9 +1122,7 @@ fn faucet(
         FaucetKind::Manual(urls) => print_manual_faucet(chain, sats, urls),
         FaucetKind::Mined => {
             println!("regtest has no faucet — mine to this address instead:");
-            println!(
-                "  rbitcoin-cli --datadir DIR generatetodescriptor 101 'addr({address})'"
-            );
+            println!("  rbitcoin-cli --datadir DIR generatetodescriptor 101 'addr({address})'");
             println!("101 blocks, because a coinbase matures 100 blocks after the one paying it.");
         }
     }
@@ -1208,11 +1206,12 @@ fn print_manual_faucet(chain: Chain, sats: u64, urls: &[&str]) {
 /// the scan key's public half. Built rather than parsed from `sp-address` so
 /// change cannot end up at a code that only looks like this wallet's.
 fn own_sp_address(connection: &Connection, chain: Chain) -> Result<sp::SilentPaymentAddress> {
-    let keys = spstore::keys(connection)?.context(
-        "silent payment change needs this wallet's own code; run sp-pair first",
-    )?;
+    let keys = spstore::keys(connection)?
+        .context("silent payment change needs this wallet's own code; run sp-pair first")?;
     Ok(sp::SilentPaymentAddress {
-        scan: keys.scan.public_key(&bdk_wallet::bitcoin::secp256k1::Secp256k1::new()),
+        scan: keys
+            .scan
+            .public_key(&bdk_wallet::bitcoin::secp256k1::Secp256k1::new()),
         spend: keys.spend,
         mainnet: chain.network() == Network::Bitcoin,
     })
@@ -2003,13 +2002,19 @@ mod tests {
     /// what a replaced transaction looks like, and it never confirms.
     #[test]
     fn an_outputs_standing_follows_the_chain_not_the_store() {
-        assert!(matches!(classify(319_011, Some(false)), Standing::Spendable));
+        assert!(matches!(
+            classify(319_011, Some(false)),
+            Standing::Spendable
+        ));
         assert!(matches!(classify(319_011, Some(true)), Standing::Spent));
         assert!(matches!(
             classify(spscan::UNCONFIRMED, Some(false)),
             Standing::Unconfirmed
         ));
-        assert!(matches!(classify(spscan::UNCONFIRMED, None), Standing::Gone));
+        assert!(matches!(
+            classify(spscan::UNCONFIRMED, None),
+            Standing::Gone
+        ));
         // Spent wins over a height the store never updated.
         assert!(matches!(
             classify(spscan::UNCONFIRMED, Some(true)),
