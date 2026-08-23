@@ -217,3 +217,51 @@ fn sp_balance_reports_an_empty_wallet_without_a_scan() {
     assert!(stdout.contains("never"), "{stdout}");
     assert!(stdout.contains("silent payment total: 0 sats"), "{stdout}");
 }
+
+#[test]
+fn spending_silent_payments_needs_a_pairing_before_it_needs_coins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    init_watch_only(&wallet_dir, "signet");
+
+    // "insufficient funds" would be true and useless: nothing has been paired,
+    // so there is no key with which a payment could ever have been found.
+    let (ok, _, stderr) = run(
+        &wallet_dir,
+        &[
+            "create",
+            "--to",
+            KISS_FIRST_ADDRESS,
+            "--sats",
+            "10000",
+            "--from-sp",
+        ],
+    );
+    assert!(!ok, "an unpaired wallet cannot spend silent payments");
+    assert!(stderr.contains("sp-pair"), "{stderr}");
+}
+
+#[test]
+fn spending_silent_payments_says_to_scan_before_it_reaches_the_network() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    init_watch_only(&wallet_dir, "signet");
+    run(&wallet_dir, &["sp-pair", "--key", SCAN_EXPORT]);
+
+    // Esplora points at a dead port here, so reaching it would hang or fail
+    // obscurely. With nothing found there is nothing to ask about, and the
+    // answer names the command that would change that.
+    let (ok, _, stderr) = run(
+        &wallet_dir,
+        &[
+            "create",
+            "--to",
+            KISS_FIRST_ADDRESS,
+            "--sats",
+            "10000",
+            "--from-sp",
+        ],
+    );
+    assert!(!ok, "no silent payments have been found yet");
+    assert!(stderr.contains("sp-scan"), "{stderr}");
+}

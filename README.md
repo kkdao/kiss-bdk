@@ -132,9 +132,40 @@ pointed at, so it can only ever be a testnet key.
 Signet is the only chain here with a published tweak server, the one BDK's own
 workshop uses. Point `--blindbit` at another to override it.
 
-**Found, not yet spendable.** Moving a received silent payment needs KISS to
-sign with its spend key plus the output's tweak, and without the usual taproot
-tweak — a signer change this coordinator cannot ask for yet.
+### Spending what was received
+
+```sh
+kiss-bdk create --to tb1q... --sats 10000 --from-sp --qr
+```
+
+A received silent payment pays `B_spend + t*G`, so its private key is the spend
+key plus the output's tweak. That is not a BIP-32 child of anything, which is
+why no descriptor holds these coins and why `--from-sp` is a separate source
+rather than part of the ordinary balance. BDK still computes the fee and the
+change; the tweak travels as BIP-376's `PSBT_IN_SP_TWEAK` and KISS adds it to
+the spend key it kept.
+
+Nothing is taken on trust in either direction. Before the PSBT is written, every
+candidate is re-derived here and dropped unless the tweak reproduces the script
+the output actually pays — the same check KISS makes, so a store left over from
+a previous pairing says so by name instead of being refused across the room.
+Before broadcast, the returned Schnorr signature is verified against the key
+this coordinator worked out for itself.
+
+**Silent payment coins are spent on their own.** A transaction mixing them with
+ordinary ones is refused by the signer, and the reason is worth knowing: BIP-143
+commits only to the amount of the input being signed, so with two or more inputs
+a coordinator can run two individually-truthful signing sessions and combine
+them into a transaction paying a fee neither screen showed. BIP-341 hashes every
+input amount, so an all-taproot spend proves its own fee. A P2WPKH input does
+not. So if the silent payment balance cannot cover a payment, the ordinary
+balance cannot make up the difference — `create` says so rather than building
+something KISS will reject.
+
+Change goes back to an ordinary wallet address for now, which links the coin to
+the descriptor wallet. Sending change back to this wallet's own silent payment
+code needs BIP-376 inputs and BIP-375 outputs in one PSBT; the signer supports
+it and this coordinator does not yet.
 
 [BlindBit]: https://github.com/setavenger/blindbit-oracle
 
@@ -237,4 +268,18 @@ Its 10,000 sat output pays a `tsp1` address whose scan and spend keys are
 throwaway test values, so the payment can be checked from the receiving side
 too: deriving from that scan key reproduces the broadcast output script
 `tb1p74frpnrdrq2mt09xdnrje0ewvctp4g2wzra0a8xpdmuc3lhuafast97k48`.
+
+Closing the loop, a received silent payment was then spent back out over the
+same hardware on Mutinynet. The coordinator built a BIP-376 PSBTv2 carrying the
+output's tweak, KISS signed with its spend key plus that tweak, and the
+coordinator verified the returned Schnorr signature against the key it had
+re-derived for itself before finalizing it:
+
+[3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80](https://mutinynet.com/tx/3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80)
+
+Its single input is the silent payment output of
+[10aa6d1e265e24d07af34d722e86ac2e70bbd17c44a5c3704ad1c1e9677c562b](https://mutinynet.com/tx/10aa6d1e265e24d07af34d722e86ac2e70bbd17c44a5c3704ad1c1e9677c562b),
+spent as a `v1_p2tr` key path with one 64-byte signature — the shape a BIP-376
+spend has to have, since the key is `spend + tweak` and no taproot tweak is
+applied on top of it.
 

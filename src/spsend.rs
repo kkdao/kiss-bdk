@@ -57,16 +57,25 @@ pub fn placeholder_index(psbt: &Psbt, recipient: &SilentPaymentAddress) -> Resul
 const PSBT_OUT_SCRIPT: u8 = 0x04;
 const PSBT_MAGIC: [u8; 5] = [0x70, 0x73, 0x62, 0x74, 0xff];
 
-/// Convert BDK's v0 PSBT into the BIP-375 PSBTv2 KISS signs, replacing the
-/// placeholder output at `sp_index` with the silent payment recipient.
-pub fn build_sp_psbt(
-    psbt: &Psbt,
-    sp_index: usize,
-    recipient: &SilentPaymentAddress,
-) -> Result<Vec<u8>> {
+/// An output whose script the signer derives, and the address it must reach.
+pub struct SpOutput {
+    pub index: usize,
+    pub recipient: SilentPaymentAddress,
+}
+
+/// Convert BDK's v0 PSBT into the PSBTv2 KISS signs, replacing each placeholder
+/// output with its silent payment recipient.
+///
+/// `sp_outputs` may be empty. A BIP-376 spend has silent payment *inputs* and
+/// ordinary outputs, and it still has to leave here as a v2: the signer computes
+/// its taproot sighash only from the transaction view it extracts from a v2's
+/// own fields, so a v0 carrying tweaks loads green and then fails to sign.
+pub fn build_v2(psbt: &Psbt, sp_outputs: &[SpOutput]) -> Result<Vec<u8>> {
     let tx = &psbt.unsigned_tx;
-    if sp_index >= tx.output.len() {
-        bail!("silent payment output index {sp_index} is out of range");
+    for sp in sp_outputs {
+        if sp.index >= tx.output.len() {
+            bail!("silent payment output index {} is out of range", sp.index);
+        }
     }
 
     let mut constructor = Creator::new()
@@ -92,6 +101,22 @@ pub fn build_sp_psbt(
         built.non_witness_utxo = input.non_witness_utxo.clone();
         built.sequence = Some(txin.sequence);
         built.bip32_derivations = compressed_derivations(&input.bip32_derivation);
+        // A BIP-376 input carries its tweak and its spend-key origin as raw
+        // pairs, because no typed field for either exists in psbt-v2 0.3.0.
+        // They are built in `spspend` and only carried here.
+        built.unknowns = input
+            .unknown
+            .iter()
+            .map(|(key, value)| {
+                (
+                    psbt_v2::raw::Key {
+                        type_value: key.type_value,
+                        key: key.key.clone(),
+                    },
+                    value.clone(),
+                )
+            })
+            .collect();
         // Sighash type is deliberately left unset: BIP-375 signing is
         // SIGHASH_ALL, which is what KISS uses when the field is absent.
         constructor = constructor.input(built);
@@ -100,11 +125,11 @@ pub fn build_sp_psbt(
     for (index, txout) in tx.output.iter().enumerate() {
         let mut built = OutputBuilder::new(txout.clone()).build();
         built.bip32_derivations = compressed_derivations(&psbt.outputs[index].bip32_derivation);
-        if index == sp_index {
+        if let Some(sp) = sp_outputs.iter().find(|sp| sp.index == index) {
             // The signer derives this script; carrying the placeholder would
             // both be wrong and let a coordinator smuggle in its own output.
             built.script_pubkey = ScriptBuf::default();
-            built.sp_v0_info = Some(recipient.sp_v0_info());
+            built.sp_v0_info = Some(sp.recipient.sp_v0_info());
         }
         constructor = constructor.output(built);
     }
@@ -280,10 +305,18 @@ pub fn to_v0(v2: &psbt_v2::v2::Psbt) -> Result<Psbt> {
 
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)
         .map_err(|error| anyhow::anyhow!("rebuilding a v0 PSBT: {error}"))?;
-    for (target, source) in psbt.inputs.iter_mut().zip(v2.inputs.iter()) {
+    for (index, (target, source)) in psbt.inputs.iter_mut().zip(v2.inputs.iter()).enumerate() {
+        // This is a hand-maintained whitelist, and it has already silently
+        // dropped a signature once -- the taproot one below, which is the whole
+        // point of a BIP-376 spend. So anything it does not know how to carry is
+        // a refusal rather than an omission: losing a signature here surfaces
+        // much later as an unexplainable "not fully signed/finalizable".
+        unsupported(index, source)?;
+
         target.witness_utxo = source.witness_utxo.clone();
         target.partial_sigs = source.partial_sigs.clone();
         target.bip32_derivation = secp_derivations(&source.bip32_derivations);
+        target.tap_key_sig = source.tap_key_sig;
         target.final_script_sig = source.final_script_sig.clone();
         target.final_script_witness = source.final_script_witness.clone();
     }
@@ -291,6 +324,47 @@ pub fn to_v0(v2: &psbt_v2::v2::Psbt) -> Result<Psbt> {
         target.bip32_derivation = secp_derivations(&source.bip32_derivations);
     }
     Ok(psbt)
+}
+
+/// Refuse a v2 input carrying something `to_v0` would drop on the floor.
+///
+/// The two BIP-376 raw pairs are expected: the signer reads the tweak and
+/// leaves it in place, and neither it nor its spend-key origin has any meaning
+/// once the transaction is finalized.
+fn unsupported(index: usize, input: &psbt_v2::v2::Input) -> Result<()> {
+    let mut carried = Vec::new();
+    if !input.tap_script_sigs.is_empty() {
+        carried.push("taproot script-path signatures");
+    }
+    if !input.tap_scripts.is_empty() {
+        carried.push("taproot leaf scripts");
+    }
+    if !input.proprietaries.is_empty() {
+        carried.push("proprietary fields");
+    }
+    let stray: Vec<u8> = input
+        .unknowns
+        .keys()
+        .map(|key| key.type_value)
+        .filter(|type_value| {
+            *type_value != crate::spspend::PSBT_IN_SP_TWEAK
+                && *type_value != crate::spspend::PSBT_IN_SP_SPEND_BIP32_DERIVATION
+        })
+        .collect();
+    if !stray.is_empty() {
+        bail!(
+            "input {index} carries unrecognised PSBT fields {stray:02x?}; \
+             flattening it would silently discard them"
+        );
+    }
+    if !carried.is_empty() {
+        bail!(
+            "input {index} carries {}, which this coordinator cannot flatten to a \
+             v0 PSBT without losing them",
+            carried.join(" and ")
+        );
+    }
+    Ok(())
 }
 
 fn secp_derivations(

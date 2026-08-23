@@ -1,5 +1,6 @@
 /target/
 /kiss-bdk-wallet/
 /hackathon-demo/
+/mutiny-demo/
 *.psbt
 *-qr.png

@@ -1,11 +1,16 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
+use std::collections::BTreeMap;
+
 use bdk_wallet::bitcoin::Psbt;
+use bdk_wallet::bitcoin::bip32::Fingerprint;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
+use bdk_wallet::bitcoin::secp256k1::XOnlyPublicKey;
 use bdk_wallet::bitcoin::sighash::SighashCache;
 use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::miniscript::descriptor::{DescriptorPublicKey, checksum};
@@ -18,11 +23,27 @@ pub mod sp;
 pub mod spreceive;
 pub mod spscan;
 pub mod spsend;
+pub mod spspend;
 pub mod spstore;
 pub mod spverify;
 
 /// Split the two-path descriptor emitted by KISS (`/<0;1>/*`) into the
 /// external and internal descriptors expected by BDK.
+/// The master fingerprint in a KISS descriptor's key origin.
+///
+/// The BIP-352 spend key is a sibling of this descriptor's account under the
+/// same master, so a BIP-376 input's key origin needs this and the fixed
+/// `352h/1h/0h/0h/0` path. Read from the descriptor rather than stored, because
+/// the scan-key export is parsed for its keys alone.
+pub fn kiss_fingerprint(descriptor: &str) -> Result<Fingerprint> {
+    let origin = descriptor
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map(|(fingerprint, _)| fingerprint)
+        .context("descriptor has no key origin to read a fingerprint from")?;
+    Fingerprint::from_str(origin).context("descriptor has an invalid master fingerprint")
+}
+
 pub fn split_kiss_descriptor(descriptor: &str) -> Result<(String, String)> {
     let descriptor = descriptor.trim();
     if descriptor.is_empty() {
@@ -149,12 +170,26 @@ pub fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Cryptographically verify every ECDSA partial signature carried by a
-/// KISS-signed PSBT before BDK turns those signatures into final scripts.
-pub fn verify_psbt_ecdsa_signatures(psbt: &Psbt) -> Result<()> {
+/// Cryptographically verify every signature a KISS-signed PSBT carries, before
+/// BDK turns any of them into a final script.
+///
+/// Inputs named in `taproot` are BIP-376 silent payments and are checked as
+/// BIP-341 key-path Schnorr against the key this coordinator re-derived; every
+/// other input is checked as ECDSA. An input in neither is a refusal rather
+/// than a skip: the invariant that matters is that no input reaches broadcast
+/// with a signature nothing looked at, and one function enforcing it is harder
+/// to leave a gap in than two functions whose coverage has to union.
+pub fn verify_psbt_signatures(
+    psbt: &Psbt,
+    taproot: &BTreeMap<usize, XOnlyPublicKey>,
+) -> Result<()> {
+    spspend::verify_signatures(psbt, taproot)?;
     let secp = Secp256k1::verification_only();
     let mut sighash_cache = SighashCache::new(&psbt.unsigned_tx);
     for index in 0..psbt.inputs.len() {
+        if taproot.contains_key(&index) {
+            continue;
+        }
         let (message, expected_sighash) = psbt
             .sighash_ecdsa(index, &mut sighash_cache)
             .with_context(|| format!("calculating signature hash for input {index}"))?;
