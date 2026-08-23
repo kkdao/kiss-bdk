@@ -107,9 +107,25 @@ kiss-bdk sp-scan --electrum 127.0.0.1:50001
 ```
 
 [rbitcoin] indexes the same tweaks and serves them over the Electrum protocol,
-so nobody has to be asked at all. Run it with `--shindex --sptweaks
---electrum-listen`, and point `--esplora` at its `--esplora-listen` too if you
-want the whole wallet off other people's servers.
+so nobody has to be asked at all. Plain `cargo` builds it on macOS and Linux:
+
+```sh
+git clone https://github.com/reardencode/rbitcoin && cd rbitcoin
+cargo build --release -p rbitcoin-node
+./target/release/rbitcoin-node --datadir ~/rbitcoin-signet --network signet \
+  --shindex --sptweaks \
+  --electrum-listen 127.0.0.1:50001 --esplora-listen 127.0.0.1:3000
+```
+
+```sh
+kiss-bdk init --network signet --scan-qr --esplora http://127.0.0.1:3000
+kiss-bdk sp-scan --electrum 127.0.0.1:50001
+```
+
+It serves nothing until it has caught up — both listeners stay closed during
+sync and the tweak index is built after it, so there is no partial-chain
+shortcut. Signet cost 19 GB, ~1½ h to sync and ~18 min to index; pruning is a
+stated non-goal. `--network regtest` comes up in seconds.
 
 This is also faster, and not only because it is local. BlindBit publishes a bare
 list of tweaks, so finding which transaction each belongs to means fetching the
