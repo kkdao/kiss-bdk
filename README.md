@@ -12,6 +12,8 @@ keys. They only ever talk in QR codes.
 
 `Pair` → `Sync` → `Build` → `Sign` → `Verify` → `Broadcast`
 
+[Roadmap](ROADMAP.md) · [How silent payments work here](docs/silent-payments.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+
 ## 🧩 Who does what
 
 Silent payments are not one library's job, which is worth knowing before
@@ -29,46 +31,27 @@ BDK is not the server and not the signer.
 
 ## 📦 Install
 
-macOS and Linux. You need Rust, a C compiler, and a webcam for the QR steps.
-
-**macOS**
+Needs Rust, a C compiler and a webcam. macOS and Linux.
 
 ```sh
+# macOS
 xcode-select --install
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Linux (Debian or Ubuntu)
+sudo apt install -y build-essential pkg-config libv4l-dev libclang-dev clang
 ```
 
-**Linux (Debian or Ubuntu)**
-
 ```sh
-sudo apt install -y build-essential pkg-config libv4l-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-Then on either, with git:
-
-```sh
 git clone https://github.com/kkdao/kiss-bdk && cd kiss-bdk
 cargo build --release
 ```
 
-Or without git, as a zip:
+Commands below start `./target/release/kiss-bdk`, or run `cargo install --path .`
+to type just `kiss-bdk`. No git? Download the
+[zip](https://github.com/kkdao/kiss-bdk/archive/refs/heads/main.zip) instead.
 
-```sh
-curl -L https://github.com/kkdao/kiss-bdk/archive/refs/heads/main.zip -o kiss-bdk.zip
-unzip kiss-bdk.zip && cd kiss-bdk-main
-cargo build --release
-```
-
-That leaves the program at `target/release/kiss-bdk`, so every command below
-starts `./target/release/kiss-bdk`. To type just `kiss-bdk` from anywhere:
-
-```sh
-cargo install --path .
-```
-
-The first `--scan-qr` or `scan` makes macOS ask for camera permission. No
-webcam is fine: every flow also works from files, see
+macOS asks for camera permission on the first `--scan-qr`. No webcam is fine:
+everything also works from files, see
 [Testing another signing device](#-testing-another-signing-device).
 
 ## 🌐 Networks
@@ -119,38 +102,50 @@ Fees default to 2 sat/vB. On a busy test network pass `--fee-rate`.
 
 ## 🤫 Silent payments
 
+One reusable code, `tsp1…`, and no address reuse. The reasoning behind all of
+this is in [docs/silent-payments.md](docs/silent-payments.md); these are the
+commands.
+
 ### Sending to one
 
 ```sh
 kiss-bdk create --to tsp1… --sats 10000 --qr
 ```
 
-The output script comes from the *input private keys*, so a watch-only wallet
-cannot compute it. BIP-375 puts the recipient's keys in the PSBT and lets the
-signing device fill the script in. Three things are checked before broadcast:
-the same transaction came back, its BIP-374 DLEQ proof is valid, and
-re-deriving the output reproduces the script the signing device wrote.
+The signing device derives the output script, because only the input private
+keys can. Before broadcast this checks the same transaction came back, that its
+DLEQ proof is honest, and that re-deriving reproduces the script it wrote.
 
 ### Receiving
 
 ```sh
-kiss-bdk sp-pair --scan-qr     # import KISS's scan key
+kiss-bdk sp-pair --scan-qr     # import the scan key
 kiss-bdk sp-address            # the tsp1… code to hand out
 kiss-bdk sp-scan               # search the chain
 kiss-bdk sp-balance            # what was found
 ```
 
-Nothing on chain names the recipient, so every block has to be tested against
-the scan key, and that test needs each transaction's input key sum, which
-Esplora will not serve. So tweaks come from a [BlindBit] server and are matched
-locally. The server learns which blocks you scanned, never which outputs
-matched.
+Finding a payment means testing every block against your scan key, using data
+no block explorer serves. It comes from a [BlindBit] oracle by default and is
+matched locally, so the server learns which blocks you scanned and never which
+outputs matched.
 
-`sp-pair` imports the scan private key and never the spend key: this wallet can
-see payments and can never move them.
+`sp-pair` imports the scan key only: this wallet can see payments and can never
+move them. `sp-scan --tx <txid>` works before a payment is mined.
 
-`sp-scan --tx <txid>` works before a payment is mined, deriving the tweak from
-the transaction itself instead of asking a server.
+### Spending what was received
+
+```sh
+kiss-bdk create --to tb1q… --sats 10000 --from-sp --qr
+```
+
+Change stays in the silent payment keyspace rather than landing on an ordinary
+address.
+
+**Silent payment coins are spent on their own.** A transaction mixing them with
+ordinary coins is refused, because only an all-taproot spend proves its own fee.
+If the silent payment balance cannot cover a payment, the ordinary balance
+cannot make up the difference.
 
 ### From a node of your own
 
@@ -166,66 +161,17 @@ cargo build --release -p rbitcoin-node
 kiss-bdk sp-scan --electrum 127.0.0.1:50001
 ```
 
-[rbitcoin] serves the same tweaks over the Electrum protocol, so nobody has to
-be asked at all. Each tweak arrives already attached to its transaction, so
-**scanning fetches no blocks**. On signet that was 46 s against BlindBit's
-5 m 23 s.
+[rbitcoin] serves the same data over the Electrum protocol, so nobody is asked
+at all. Each tweak arrives attached to its transaction, so **no blocks are
+fetched**: 46 s against BlindBit's 5 m 23 s over the same signet range.
 
-**Storage.** A full archive, because rbitcoin does not prune: **signet is 19 GB**,
-about 1½ hours to sync and 18 more to index, measured on an Apple-silicon
-laptop. Mainnet is far larger and out of scope here. `--network regtest` needs
-almost nothing and comes up in seconds.
+**Storage.** It does not prune, so this is a full archive: **signet is 19 GB**,
+roughly 1½ hours to sync plus 18 minutes to index. It serves nothing until that
+finishes. `--network regtest` comes up in seconds.
 
-It also serves nothing until fully synced: both listeners stay closed during
-sync and the tweak index is built after it, so there is no partial-chain
-shortcut.
-
-Silent payments run entirely against that node, scanning and the on-chain amount
-checks alike. The *ordinary* wallet cannot yet: `sync` reads block headers, and
-rbitcoin serves `bits` as a hex string where Esplora's schema has an integer, so
-`bdk_esplora` refuses it ([issue #209](https://github.com/reardencode/rbitcoin/issues/209)).
-Until that lands, leave `--esplora` on a public server and give `sp-scan` the
-`--electrum` flag.
-
-Amounts are still checked against the chain before being stored. A value ends up
-in the `witness_utxo` of the spend that moves the coin and BIP-341 signs over
-it, so a wrong one is a valid signature over a lie.
-
-### Which tweak source
-
-| | who matches | what the server learns |
-| --- | --- | --- |
-| your own node | you | nothing |
-| BlindBit | you | which blocks you scanned |
-| Frigate (Sparrow) | **the server** | **every payment you receive** |
-
-[Frigate] is not a faster oracle, it is a different trust model: the client
-hands it the **scan private key** and the server does the matching. The other
-two send you tweaks and your keys never leave. That is the whole comparison.
-
-[Frigate]: https://github.com/sparrowwallet/frigate
-
-### Spending what was received
-
-```sh
-kiss-bdk create --to tb1q… --sats 10000 --from-sp --qr
-```
-
-A received silent payment pays `B_spend + t*G`, the spend key plus that
-output's tweak, which is a BIP-32 child of nothing and lives in no descriptor.
-The tweak travels as BIP-376's `PSBT_IN_SP_TWEAK`, and the signature that comes
-back is verified against a key worked out locally.
-
-**Silent payment coins are spent on their own.** A transaction mixing them with
-ordinary coins is refused: BIP-341 hashes every input amount, so an all-taproot
-spend proves its own fee, and a P2WPKH input does not. If the silent payment
-balance cannot cover a payment, the ordinary balance cannot make up the
-difference.
-
-Change goes back into the silent payment keyspace, not to an ordinary address:
-the transaction carries BIP-376 on its inputs and BIP-375 on both outputs, which
-is the ordinary shape of a silent payment wallet's spend. Paying your own code
-is fine too, and simply puts two derived outputs in one transaction.
+Silent payments work fully against your node today. Ordinary `sync` does not
+yet, so leave `--esplora` on a public server for now
+([rbitcoin#209](https://github.com/reardencode/rbitcoin/issues/209)).
 
 [BlindBit]: https://github.com/setavenger/blindbit-oracle
 [rbitcoin]: https://github.com/reardencode/rbitcoin
