@@ -235,9 +235,11 @@ enum Command {
         #[arg(long)]
         sats: u64,
 
-        /// Fee rate in whole sat/vB.
-        #[arg(long, default_value_t = 2)]
-        fee_rate: u64,
+        /// Fee rate in whole sat/vB. Defaults to what the backend says the
+        /// next block costs, so a busy test network does not silently produce
+        /// a transaction nothing will mine.
+        #[arg(long)]
+        fee_rate: Option<u64>,
 
         /// Keep the original unsigned PSBT here (also used for the optional SD flow).
         #[arg(long, default_value = "unsigned.psbt")]
@@ -904,6 +906,64 @@ fn confirm_on_chain(esplora: &BlockingClient, found: &spscan::Found) -> Result<(
     Ok(())
 }
 
+/// What the backend says the next block costs, rounded up to whole sat/vB.
+///
+/// A fixed default is wrong in both directions: too low and the transaction
+/// sits in the mempool through block after block, which on an air-gapped flow
+/// means the walk to the device was wasted; too high and every test costs more
+/// than it needs to. Neither is visible in the command's own output, so the
+/// number comes from the chain instead.
+///
+/// Fetched directly rather than through `esplora_client`, which treats any
+/// status but 200 as an error: mempool.space answers `/fee-estimates` with a
+/// 203 and a perfectly good body, so the estimate is thrown away and every
+/// transaction quietly falls back to the floor.
+///
+/// A backend that cannot answer is not fatal. `MINIMUM` is what a test network
+/// wants when it is quiet, and `--fee-rate` overrides all of this anyway.
+fn next_block_fee_rate(esplora_url: &str) -> FeeRate {
+    const MINIMUM: u64 = 2;
+
+    let estimate = match fetch_next_block_estimate(esplora_url) {
+        Ok(rate) => rate.max(MINIMUM),
+        Err(error) => {
+            eprintln!("warning: no fee estimate ({error:#}); using {MINIMUM} sat/vB");
+            MINIMUM
+        }
+    };
+    println!("fee rate: {estimate} sat/vB (next block; --fee-rate overrides)");
+    FeeRate::from_sat_per_vb(estimate).unwrap_or(FeeRate::BROADCAST_MIN)
+}
+
+/// Split out so the shape of the answer can be tested without a server.
+fn fetch_next_block_estimate(esplora_url: &str) -> Result<u64> {
+    let url = format!("{}/fee-estimates", esplora_url.trim_end_matches('/'));
+    let response = minreq::get(&url)
+        .with_timeout(ESPLORA_TIMEOUT_SECS)
+        .send()
+        .with_context(|| format!("asking {url}"))?;
+    if !(200..300).contains(&response.status_code) {
+        bail!("{url} answered HTTP {}", response.status_code);
+    }
+    parse_next_block_estimate(response.as_str().context("the answer is not UTF-8")?)
+}
+
+/// Esplora publishes a target-blocks to sat/vB map. Only the next block matters
+/// here, and a fractional rate rounds up rather than down: rounding down is how
+/// a transaction ends up one satoshi under what the mempool is accepting.
+fn parse_next_block_estimate(body: &str) -> Result<u64> {
+    let estimates: std::collections::HashMap<String, f64> =
+        serde_json::from_str(body).context("fee estimates are not a JSON object")?;
+    let rate = estimates
+        .get("1")
+        .copied()
+        .context("no next-block estimate published")?;
+    if !rate.is_finite() || rate <= 0.0 {
+        bail!("the next-block estimate is {rate}");
+    }
+    Ok(rate.ceil() as u64)
+}
+
 fn sp_balance(wallet_dir: &Path) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
     let (mut connection, _wallet) = open_wallet(wallet_dir, &config, chain)?;
@@ -1072,7 +1132,7 @@ fn create_psbt(
     wallet_dir: &Path,
     destination: &str,
     sats: u64,
-    fee_rate: u64,
+    fee_rate: Option<u64>,
     out: &Path,
     qr: bool,
     from_sp: bool,
@@ -1080,7 +1140,7 @@ fn create_psbt(
     if sats == 0 {
         bail!("--sats must be greater than zero");
     }
-    if fee_rate == 0 {
+    if fee_rate == Some(0) {
         bail!("--fee-rate must be greater than zero");
     }
     if !qr {
@@ -1100,7 +1160,10 @@ fn create_psbt(
     }
     let (config, chain) = load_config(wallet_dir)?;
     let recipient = parse_destination(destination, chain)?;
-    let fee_rate = FeeRate::from_sat_per_vb(fee_rate).context("fee rate is too large")?;
+    let fee_rate = match fee_rate {
+        Some(given) => FeeRate::from_sat_per_vb(given).context("fee rate is too large")?,
+        None => next_block_fee_rate(&config.esplora),
+    };
 
     let (mut connection, mut wallet) = open_wallet(wallet_dir, &config, chain)?;
     let sp_spend = if from_sp {
@@ -1791,5 +1854,27 @@ mod tests {
         assert!(faucet_request_body(0, "tb1qexample").is_err());
         assert!(faucet_request_body(MUTINYNET_MAX_FAUCET_SATS, "tb1qexample").is_ok());
         assert!(faucet_request_body(MUTINYNET_MAX_FAUCET_SATS + 1, "tb1qexample").is_err());
+    }
+
+    /// The exact body mempool.space returns, which `esplora_client` rejects for
+    /// its 203 status. Rounding is up: a transaction one satoshi under what the
+    /// mempool wants is one that never confirms.
+    #[test]
+    fn reads_the_next_block_estimate_and_rounds_up() {
+        let body = r#"{"1":6.511,"2":6.511,"6":5.01,"144":0.2,"1008":0.1}"#;
+        assert_eq!(parse_next_block_estimate(body).unwrap(), 7);
+    }
+
+    #[test]
+    fn a_whole_number_estimate_is_not_rounded_past_itself() {
+        assert_eq!(parse_next_block_estimate(r#"{"1":4.0}"#).unwrap(), 4);
+    }
+
+    #[test]
+    fn refuses_estimates_that_cannot_be_a_fee() {
+        assert!(parse_next_block_estimate(r#"{"6":5.01}"#).is_err());
+        assert!(parse_next_block_estimate(r#"{"1":0}"#).is_err());
+        assert!(parse_next_block_estimate(r#"{"1":-3}"#).is_err());
+        assert!(parse_next_block_estimate("<!DOCTYPE html>").is_err());
     }
 }

@@ -247,6 +247,10 @@ fn spending_silent_payments_needs_a_pairing_before_it_needs_coins() {
 
     // "insufficient funds" would be true and useless: nothing has been paired,
     // so there is no key with which a payment could ever have been found.
+    // `--out` inside the temp directory on purpose: the default is relative to
+    // the working directory, so without it these tests fail whenever the repo
+    // root happens to hold an `unsigned.psbt` from real use.
+    let out = tmp.path().join("unsigned.psbt");
     let (ok, _, stderr) = run(
         &wallet_dir,
         &[
@@ -256,6 +260,10 @@ fn spending_silent_payments_needs_a_pairing_before_it_needs_coins() {
             "--sats",
             "10000",
             "--from-sp",
+            "--fee-rate",
+            "2",
+            "--out",
+            out.to_str().unwrap(),
         ],
     );
     assert!(!ok, "an unpaired wallet cannot spend silent payments");
@@ -272,6 +280,10 @@ fn spending_silent_payments_says_to_scan_before_it_reaches_the_network() {
     // Esplora points at a dead port here, so reaching it would hang or fail
     // obscurely. With nothing found there is nothing to ask about, and the
     // answer names the command that would change that.
+    // `--out` inside the temp directory on purpose: the default is relative to
+    // the working directory, so without it these tests fail whenever the repo
+    // root happens to hold an `unsigned.psbt` from real use.
+    let out = tmp.path().join("unsigned.psbt");
     let (ok, _, stderr) = run(
         &wallet_dir,
         &[
@@ -281,6 +293,10 @@ fn spending_silent_payments_says_to_scan_before_it_reaches_the_network() {
             "--sats",
             "10000",
             "--from-sp",
+            "--fee-rate",
+            "2",
+            "--out",
+            out.to_str().unwrap(),
         ],
     );
     assert!(!ok, "no silent payments have been found yet");

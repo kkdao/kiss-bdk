@@ -4,6 +4,14 @@
 
 # KISS-BDK
 
+<p align="center">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/rust-2024_edition-orange.svg">
+  <img alt="Silent payments" src="https://img.shields.io/badge/BIP--352%20%7C%20375%20%7C%20376-silent%20payments-8A2BE2.svg">
+  <img alt="Networks" src="https://img.shields.io/badge/testnet4%20%7C%20signet%20%7C%20mutinynet%20%7C%20regtest-green.svg">
+  <a href="https://t.me/DIYbitcoin"><img alt="Telegram" src="https://img.shields.io/badge/chat-DIY%20Bitcoin-2CA5E0.svg?logo=telegram&logoColor=white"></a>
+</p>
+
 **Air-gapped Bitcoin transactions powered by BDK**
 
 An experimental Rust coordinator for the Bitcoin test networks. BDK runs the
@@ -12,7 +20,51 @@ keys. They only ever talk in QR codes.
 
 `Pair` → `Sync` → `Build` → `Sign` → `Verify` → `Broadcast`
 
-## Networks
+## 📦 Install
+
+macOS and Linux. You need Rust, a C compiler, and a webcam for the QR steps.
+
+**macOS**
+
+```sh
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+**Linux (Debian or Ubuntu)**
+
+```sh
+sudo apt install -y build-essential pkg-config libv4l-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Then on either, with git:
+
+```sh
+git clone https://github.com/kkdao/kiss-bdk && cd kiss-bdk
+cargo build --release
+```
+
+Or without git, as a zip:
+
+```sh
+curl -L https://github.com/kkdao/kiss-bdk/archive/refs/heads/main.zip -o kiss-bdk.zip
+unzip kiss-bdk.zip && cd kiss-bdk-main
+cargo build --release
+```
+
+That leaves the program at `target/release/kiss-bdk`, so every command below
+starts `./target/release/kiss-bdk`. To type just `kiss-bdk` from anywhere:
+
+```sh
+cargo install --path .
+```
+
+The first `--scan-qr` or `scan` makes macOS ask for camera permission. No
+webcam is fine: every flow also works from files, see
+[Testing another signing device](#-testing-another-signing-device).
+
+## 🌐 Networks
 
 Chosen at `init` and fixed for that wallet directory.
 
@@ -28,7 +80,7 @@ of them, which also means a `tb1…` address is valid on three of them and
 nothing tells them apart. Keep one `--wallet-dir` per network. Mainnet is not
 selectable. Mutinynet's 30-second blocks make it the one to demo on.
 
-## Quick start
+## 🚀 Quick start
 
 On KISS: enable Testnet, unlock, then **PAIR COORDINATOR → DESKTOP**.
 
@@ -58,7 +110,7 @@ every signature, and finalizes before anything reaches the network.
 
 Fees default to 2 sat/vB. On a busy test network pass `--fee-rate`.
 
-## Silent payments
+## 🤫 Silent payments
 
 ### Sending to one
 
@@ -115,6 +167,13 @@ be asked at all. Each tweak arrives already attached to its transaction, so
 It serves nothing until fully synced: signet cost 19 GB, about 1½ hours to sync
 and 18 minutes to index. `--network regtest` comes up in seconds.
 
+Silent payments run entirely against that node, scanning and the on-chain amount
+checks alike. The *ordinary* wallet cannot yet: `sync` reads block headers, and
+rbitcoin serves `bits` as a hex string where Esplora's schema has an integer, so
+`bdk_esplora` refuses it ([issue #209](https://github.com/reardencode/rbitcoin/issues/209)).
+Until that lands, leave `--esplora` on a public server and give `sp-scan` the
+`--electrum` flag.
+
 Amounts are still checked against the chain before being stored. A value ends up
 in the `witness_utxo` of the spend that moves the coin and BIP-341 signs over
 it, so a wrong one is a valid signature over a lie.
@@ -155,7 +214,7 @@ Change goes to an ordinary address for now.
 [BlindBit]: https://github.com/setavenger/blindbit-oracle
 [rbitcoin]: https://github.com/reardencode/rbitcoin
 
-## Topping up
+## 💧 Topping up
 
 ```sh
 kiss-bdk faucet --sats 100000
@@ -166,7 +225,7 @@ token. Sign in at <https://faucet.mutinynet.com/>, then pass `--token` or export
 `MUTINYNET_FAUCET_TOKEN`. The others are captcha-protected, so the command
 prints the address and the links instead of pretending.
 
-## Testing another signing device
+## 🔌 Testing another signing device
 
 Nothing here is tied to KISS except the QR commands. `create` writes a PSBT file
 and `broadcast` reads one back, so any signing device that can load a file
@@ -228,7 +287,7 @@ Once you want to broadcast and scan for real, signet needs a faucet and
 ten-minute blocks. `--network regtest` against a local node has neither, and
 [tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) is a worked example.
 
-## Build
+## 🔨 Build
 
 ```sh
 cargo test --locked
@@ -237,7 +296,7 @@ cargo build --release --locked
 
 Needs Rust, a C compiler, and a webcam. Tested on macOS.
 
-## QR
+## 📷 QR
 
 - Computer → KISS: static Base64 PSBT QR. A PSBTv2 is larger than a v0, so
   `create --qr` stops past roughly three inputs rather than emit a frame the
@@ -245,7 +304,7 @@ Needs Rust, a C compiler, and a webcam. Tested on macOS.
 - KISS → computer: animated BC-UR `crypto-psbt`.
 - Decoding uses the vendored `k_quirc`, the same decoder KISS runs.
 
-## Proof
+## ✅ Proof
 
 Every flow below ran over the physical hardware.
 
@@ -273,3 +332,14 @@ the difference in cost.
 [tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) runs the whole thing
 unattended against a local node: mines a coin, pays a real silent payment to
 itself, and finds it again knowing only the recipient's keys.
+
+## 💬 Community
+
+Silent payments, air-gapped signing devices and DIY hardware get discussed here:
+
+<p align="center">
+  <a href="https://t.me/DIYbitcoin"><img alt="DIY Bitcoin on Telegram" src="https://img.shields.io/badge/Telegram-DIY%20Bitcoin-2CA5E0.svg?style=for-the-badge&logo=telegram&logoColor=white"></a>
+</p>
+
+Bringing BIP-375 or BIP-376 up on another device is exactly the sort of thing
+worth asking about there. Bugs and results are welcome as issues here too.
