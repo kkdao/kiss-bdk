@@ -209,7 +209,10 @@ spend proves its own fee, and a P2WPKH input does not. If the silent payment
 balance cannot cover a payment, the ordinary balance cannot make up the
 difference.
 
-Change goes to an ordinary address for now.
+Change goes back into the silent payment keyspace, not to an ordinary address:
+the transaction carries BIP-376 on its inputs and BIP-375 on both outputs, which
+is the ordinary shape of a silent payment wallet's spend. Paying your own code
+is fine too, and simply puts two derived outputs in one transaction.
 
 [BlindBit]: https://github.com/setavenger/blindbit-oracle
 [rbitcoin]: https://github.com/reardencode/rbitcoin

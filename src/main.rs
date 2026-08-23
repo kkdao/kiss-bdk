@@ -1202,6 +1202,22 @@ fn print_manual_faucet(chain: Chain, sats: u64, urls: &[&str]) {
     }
 }
 
+/// This wallet's own silent payment address, as a recipient.
+///
+/// The receive side stores the scan key and the spend key; a recipient needs
+/// the scan key's public half. Built rather than parsed from `sp-address` so
+/// change cannot end up at a code that only looks like this wallet's.
+fn own_sp_address(connection: &Connection, chain: Chain) -> Result<sp::SilentPaymentAddress> {
+    let keys = spstore::keys(connection)?.context(
+        "silent payment change needs this wallet's own code; run sp-pair first",
+    )?;
+    Ok(sp::SilentPaymentAddress {
+        scan: keys.scan.public_key(&bdk_wallet::bitcoin::secp256k1::Secp256k1::new()),
+        spend: keys.spend,
+        mainnet: chain.network() == Network::Bitcoin,
+    })
+}
+
 fn create_psbt(
     wallet_dir: &Path,
     destination: &str,
@@ -1253,6 +1269,19 @@ fn create_psbt(
     };
     let sp_coins: &[spspend::SpCoin] = sp_spend.as_ref().map_or(&[], |sp| &sp.coins);
 
+    // Change on a silent payment spend goes back into the silent payment
+    // keyspace rather than to a descriptor address. Without this, spending a
+    // received payment leaks the remainder onto an ordinary chain of addresses,
+    // which is the privacy the silent payment was for.
+    //
+    // Only when spending silent payments: an ordinary spend has no BIP-376
+    // input, and the signer needs one to build `a_sum` for a derived output.
+    let sp_change = if from_sp {
+        Some(own_sp_address(&connection, chain)?)
+    } else {
+        None
+    };
+
     let mut builder = wallet.build_tx();
     if let Some(sp) = &sp_spend {
         for coin in &sp.coins {
@@ -1292,6 +1321,12 @@ fn create_psbt(
     // It costs about 116 bytes per input, which the QR still carries; and if a
     // transaction ever does outgrow the QR, `create` says so here rather than
     // the device refusing it after the walk across the room.
+    if let Some(change) = &sp_change {
+        // BDK sends change here instead of the internal keychain
+        // (wallet/mod.rs:1445). A P2TR placeholder is also what makes it size
+        // the change output correctly, since the real one is P2TR.
+        builder.drain_to(spsend::placeholder_script(change));
+    }
     builder
         .add_recipient(recipient.script_pubkey(), Amount::from_sat(sats))
         .fee_rate(fee_rate);
@@ -1303,13 +1338,24 @@ fn create_psbt(
     // different reason: the signer computes its taproot sighash only from the
     // transaction view it extracts from a v2's own fields, so a v0 carrying
     // tweaks loads green and then fails to sign.
-    let sp_outputs = match &recipient {
+    let mut recipients = match &recipient {
         Destination::Address(_) => Vec::new(),
-        Destination::SilentPayment(sp) => vec![spsend::SpOutput {
-            index: spsend::placeholder_index(&psbt, sp)?,
-            recipient: *sp,
-        }],
+        Destination::SilentPayment(sp) => vec![*sp],
     };
+    if let Some(change) = sp_change {
+        // Change is not guaranteed: an exact-amount spend has none, and change
+        // under the dust threshold becomes fee instead of an output. Claim it
+        // only when BDK left a placeholder spare, which for a wallet paying its
+        // own code means a second output carrying the same script.
+        let already = recipients
+            .iter()
+            .filter(|paid| spsend::placeholder_script(paid) == spsend::placeholder_script(&change))
+            .count();
+        if spsend::placeholder_count(&psbt, &change) > already {
+            recipients.push(change);
+        }
+    }
+    let sp_outputs = spsend::resolve_sp_outputs(&psbt, &recipients)?;
     let want_v2 = !sp_outputs.is_empty() || !sp_coins.is_empty();
     let serialized = if want_v2 {
         spsend::build_v2(&psbt, &sp_outputs)?

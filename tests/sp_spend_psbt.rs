@@ -339,3 +339,126 @@ fn sign_as_kiss(bytes: &[u8], spend_priv: &SecretKey) -> PsbtV2 {
     }
     v2
 }
+
+/// Silent payment change: BIP-376 inputs and BIP-375 outputs in one PSBT.
+///
+/// The signer's own source calls this "the ordinary shape of an SP wallet's
+/// transaction, not a corner case". Until it existed, spending a received
+/// payment sent the remainder to a descriptor address, walking the coin back
+/// out of the keyspace the silent payment was for.
+mod silent_payment_change {
+    use super::*;
+    use kiss_bdk::sp::SilentPaymentAddress;
+    use kiss_bdk::spsend::{placeholder_count, placeholder_script, resolve_sp_outputs};
+
+    fn code(scan: u8, spend: u8) -> SilentPaymentAddress {
+        let secp = Secp256k1::new();
+        SilentPaymentAddress {
+            scan: SecretKey::from_slice(&[scan; 32]).unwrap().public_key(&secp),
+            spend: SecretKey::from_slice(&[spend; 32]).unwrap().public_key(&secp),
+            mainnet: false,
+        }
+    }
+
+    /// The real thing, through BDK: silent payment inputs, a silent payment
+    /// recipient, and change pointed at a code of our own with `drain_to`.
+    fn sp_to_sp(payee: &SilentPaymentAddress, ours: &SilentPaymentAddress, sats: u64) -> Psbt {
+        let (_, spend) = spend_keys();
+        let origin = spspend::spend_origin(Fingerprint::from_str("73c5da0a").unwrap());
+        let (external, internal) = kiss_bdk::split_kiss_descriptor(KISS_DESC).unwrap();
+        let (mut wallet, _, funding) = new_wallet_and_funding_update(&external, Some(&internal));
+        wallet.apply_update(funding).unwrap();
+
+        let mut builder = wallet.build_tx();
+        for coin in &coins(1, 100_000) {
+            builder
+                .add_foreign_utxo_with_sequence(
+                    coin.outpoint,
+                    spspend::psbt_input(coin, &spend, &origin),
+                    SATISFACTION_WEIGHT,
+                    Sequence::ENABLE_RBF_NO_LOCKTIME,
+                )
+                .unwrap();
+        }
+        builder.manually_selected_only();
+        builder.drain_to(placeholder_script(ours));
+        builder
+            .add_recipient(placeholder_script(payee), Amount::from_sat(sats))
+            .fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+        builder.finish().unwrap()
+    }
+
+    #[test]
+    fn change_lands_on_a_silent_payment_output_not_a_descriptor_address() {
+        let payee = code(0x33, 0x44);
+        let ours = code(0x11, 0x22);
+        let psbt = sp_to_sp(&payee, &ours, 40_000);
+
+        assert_eq!(psbt.unsigned_tx.output.len(), 2, "payment and change");
+        assert_eq!(placeholder_count(&psbt, &ours), 1, "change is ours");
+        assert_eq!(placeholder_count(&psbt, &payee), 1);
+        for out in &psbt.unsigned_tx.output {
+            assert!(
+                out.script_pubkey.is_p2tr(),
+                "both outputs are derived, so both are taproot: {out:?}"
+            );
+        }
+    }
+
+    /// Both outputs reach the wire carrying their recipient and no script: it
+    /// is the signer that derives the real one.
+    #[test]
+    fn both_derived_outputs_carry_their_recipient_and_no_script() {
+        let payee = code(0x33, 0x44);
+        let ours = code(0x11, 0x22);
+        let psbt = sp_to_sp(&payee, &ours, 40_000);
+
+        let resolved = resolve_sp_outputs(&psbt, &[payee, ours]).unwrap();
+        assert_eq!(resolved.len(), 2);
+        let v2 = PsbtV2::deserialize(&build_v2(&psbt, &resolved).unwrap())
+            .expect("the PSBT must parse strictly");
+
+        assert_eq!(v2.outputs.len(), 2);
+        for output in &v2.outputs {
+            assert!(
+                output.script_pubkey.is_empty(),
+                "a derived output must not carry the placeholder"
+            );
+            let info = output
+                .sp_v0_info
+                .as_ref()
+                .expect("every derived output needs PSBT_OUT_SP_V0_INFO");
+            assert_eq!(info.len(), 66, "scan and spend keys, compressed");
+        }
+    }
+
+    /// Paying your own code puts two identical placeholders in one transaction.
+    /// They used to be refused as ambiguous; they are interchangeable, and each
+    /// must be claimed exactly once.
+    #[test]
+    fn two_outputs_to_one_code_are_claimed_once_each() {
+        let ours = code(0x11, 0x22);
+        let psbt = sp_to_sp(&ours, &ours, 40_000);
+
+        assert_eq!(placeholder_count(&psbt, &ours), 2);
+        let resolved = resolve_sp_outputs(&psbt, &[ours, ours]).unwrap();
+        assert_ne!(
+            resolved[0].index, resolved[1].index,
+            "each output must be claimed once, never twice"
+        );
+    }
+
+    /// A code with no output of its own must be refused rather than guessed at:
+    /// an exact-amount spend leaves no change, and so nothing to claim.
+    #[test]
+    fn a_code_with_no_output_is_refused_rather_than_guessed() {
+        let payee = code(0x33, 0x44);
+        let ours = code(0x11, 0x22);
+        let (psbt, _) = spend_psbt(&coins(1, 100_000), 40_000);
+
+        assert_eq!(placeholder_count(&psbt, &ours), 0);
+        assert!(resolve_sp_outputs(&psbt, &[ours]).is_err());
+        assert!(resolve_sp_outputs(&psbt, &[payee]).is_err());
+        assert!(resolve_sp_outputs(&psbt, &[]).unwrap().is_empty());
+    }
+}

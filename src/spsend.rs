@@ -36,21 +36,56 @@ pub fn placeholder_script(recipient: &SilentPaymentAddress) -> ScriptBuf {
 
 /// Locate the placeholder among the outputs BDK shuffled.
 pub fn placeholder_index(psbt: &Psbt, recipient: &SilentPaymentAddress) -> Result<usize> {
+    Ok(resolve_sp_outputs(psbt, std::slice::from_ref(recipient))?[0].index)
+}
+
+/// How many outputs carry this recipient's placeholder.
+///
+/// A caller building the recipient list needs this because change is not
+/// guaranteed: an exact-amount spend has none, and a change below the dust
+/// threshold is folded into the fee instead of becoming an output.
+pub fn placeholder_count(psbt: &Psbt, recipient: &SilentPaymentAddress) -> usize {
     let placeholder = placeholder_script(recipient);
-    let mut found = psbt
-        .unsigned_tx
+    psbt.unsigned_tx
         .output
         .iter()
-        .enumerate()
-        .filter(|(_, out)| out.script_pubkey == placeholder)
-        .map(|(index, _)| index);
-    let index = found
-        .next()
-        .context("the silent payment placeholder output is missing")?;
-    if found.next().is_some() {
-        bail!("the silent payment placeholder output is ambiguous");
+        .filter(|out| out.script_pubkey == placeholder)
+        .count()
+}
+
+/// Match every recipient to the output BDK put its placeholder in.
+///
+/// One entry per output expected, so a wallet paying its own code twice — the
+/// payment and the silent payment change beside it — passes that code twice.
+///
+/// Two such outputs used to be refused as ambiguous. They are interchangeable
+/// rather than ambiguous: both carry the same `PSBT_OUT_SP_V0_INFO`, and which
+/// one ends up at derivation order 0 is the signer's to decide. What matters is
+/// that each is claimed once, so a recipient never takes an output another has
+/// already been promised.
+pub fn resolve_sp_outputs(
+    psbt: &Psbt,
+    recipients: &[SilentPaymentAddress],
+) -> Result<Vec<SpOutput>> {
+    let outputs = &psbt.unsigned_tx.output;
+    let mut claimed = vec![false; outputs.len()];
+    let mut resolved = Vec::with_capacity(recipients.len());
+
+    for recipient in recipients {
+        let placeholder = placeholder_script(recipient);
+        let index = outputs
+            .iter()
+            .enumerate()
+            .find(|(index, out)| !claimed[*index] && out.script_pubkey == placeholder)
+            .map(|(index, _)| index)
+            .context("a silent payment placeholder output is missing")?;
+        claimed[index] = true;
+        resolved.push(SpOutput {
+            index,
+            recipient: *recipient,
+        });
     }
-    Ok(index)
+    Ok(resolved)
 }
 
 /// PSBT_OUT_SCRIPT. BIP-375 omits it entirely on a silent payment output.
