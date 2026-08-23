@@ -201,6 +201,17 @@ kiss-bdk broadcast signed.psbt --original unsigned.psbt --dry-run
 
 **5.** Fix whatever it names, and repeat.
 
+To receive as well, pair from the two keys directly. BIP-352 does not say how a
+device should hand its scan key over, so KISS's `tspscan1…` export is its own
+format and this takes the keys raw instead:
+
+```sh
+kiss-bdk sp-pair --keys SCAN_PRIVATE_HEX:SPEND_PUBLIC_HEX
+```
+
+64 hex digits then 66. From there `sp-address`, `sp-scan` and `--from-sp` all
+work as they do for KISS.
+
 Step 4 is the point of all this. It takes nothing on trust: same transaction
 back, DLEQ proof, re-derived output script, every signature checked against a
 key worked out here, and it says which part failed, before anything reaches

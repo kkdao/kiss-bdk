@@ -269,7 +269,7 @@ enum Command {
         camera: u32,
     },
 
-    /// Import KISS's silent payment scan key so payments can be found.
+    /// Import a signing device's silent payment scan key so payments can be found.
     SpPair {
         /// Read the scan key from KISS's export QR with the webcam.
         #[arg(long)]
@@ -278,6 +278,13 @@ enum Command {
         /// Paste the export instead of scanning it.
         #[arg(long, conflicts_with = "scan_qr")]
         key: Option<String>,
+
+        /// Pair a device that has no KISS-style export, from the two keys
+        /// themselves: `SCAN_PRIVATE_HEX:SPEND_PUBLIC_HEX`, 64 hex digits then
+        /// 66. BIP-352 does not say how a device should hand its scan key
+        /// over, so this takes them raw.
+        #[arg(long, value_name = "SCAN:SPEND", conflicts_with_all = ["scan_qr", "key"])]
+        keys: Option<String>,
 
         /// Webcam index.
         #[arg(long, default_value_t = 0)]
@@ -389,8 +396,9 @@ fn main() -> Result<()> {
         Command::SpPair {
             scan_qr,
             key,
+            keys,
             camera,
-        } => sp_pair(&cli.wallet_dir, scan_qr, key, camera),
+        } => sp_pair(&cli.wallet_dir, scan_qr, key, keys, camera),
         Command::SpAddress => sp_address(&cli.wallet_dir),
         Command::SpScan {
             tx,
@@ -539,7 +547,7 @@ fn next_address(wallet_dir: &Path) -> Result<()> {
     println!("{}", info.address);
     println!("index: {}", info.index);
     println!("network: {}", chain.label());
-    println!("compare this address on KISS before funding it");
+    println!("compare this address on your signing device before funding it");
     Ok(())
 }
 
@@ -555,29 +563,40 @@ fn balance(wallet_dir: &Path) -> Result<()> {
 ///
 /// This is the one command that puts a secret in the wallet directory, so it
 /// says so rather than leaving that to the documentation.
-fn sp_pair(wallet_dir: &Path, scan_qr: bool, key: Option<String>, camera: u32) -> Result<()> {
+fn sp_pair(
+    wallet_dir: &Path,
+    scan_qr: bool,
+    key: Option<String>,
+    raw: Option<String>,
+    camera: u32,
+) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
-    let export = match (scan_qr, key) {
-        (true, _) => {
-            println!("hold KISS's scan key QR in front of camera {camera}...");
-            scan_scan_key(camera)?
-        }
-        (false, Some(key)) => key,
-        (false, None) => bail!("pass --scan-qr to read KISS's export, or --key to paste it"),
-    };
 
-    let keys = spreceive::parse_scan_export(&export)?;
+    // Three ways in, one wallet out. The raw pair exists so a device that does
+    // not speak KISS's export format is not shut out of receiving entirely.
+    let keys = match (scan_qr, key, raw) {
+        (_, _, Some(pair)) => spreceive::parse_scan_hex(&pair)?,
+        (true, _, None) => {
+            println!("hold KISS's scan key QR in front of camera {camera}...");
+            spreceive::parse_scan_export(&scan_scan_key(camera)?)?
+        }
+        (false, Some(key), None) => spreceive::parse_scan_export(&key)?,
+        (false, None, None) => bail!(
+            "pass --scan-qr to read KISS's export, --key to paste it, \
+             or --keys SCAN_PRIVATE_HEX:SPEND_PUBLIC_HEX for another device"
+        ),
+    };
     let (mut connection, _wallet) = open_wallet(wallet_dir, &config, chain)?;
     spstore::migrate(&mut connection)?;
     spstore::put_keys(&mut connection, &keys)?;
 
     println!("{}", keys.code(chain.network()));
     println!("network: {}", chain.label());
-    println!("compare this address on KISS before receiving to it");
+    println!("compare this address on your signing device before receiving to it");
     println!();
     println!("this wallet directory now holds the scan private key, which can");
     println!("see payments to that address but never spend them; the spend key");
-    println!("stays on KISS");
+    println!("stays on the signing device");
     Ok(())
 }
 
