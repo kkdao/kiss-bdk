@@ -23,7 +23,7 @@ way to scan it. That makes it the first place `--electrum` is not merely nicer
 than BlindBit but the only option.
 
 Status: syncing. It is 3.4M blocks behind one public peer, so it is slow rather
-than hard, and the peer wedges occasionally — `stallguard.sh` restarts it.
+than hard, and the peer wedges occasionally, `stallguard.sh` restarts it.
 
 Then: the same receive-and-spend loop, at 30 seconds a block.
 

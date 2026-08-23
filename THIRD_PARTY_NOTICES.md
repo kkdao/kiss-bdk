@@ -2,7 +2,7 @@
 
 ## k_quirc
 
-`vendor/k_quirc` is a vendored copy of the QR decoder the KISS signer runs, so
+`vendor/k_quirc` is a vendored copy of the QR decoder the KISS signing device runs, so
 that a QR this coordinator fails to decode fails the same way on both sides.
 
 Licensed MIT. Full text in [`vendor/k_quirc/LICENSE`](vendor/k_quirc/LICENSE).

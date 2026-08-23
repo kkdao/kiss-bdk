@@ -14,8 +14,8 @@ a real statement rather than a partial one.
 
 ## Say whether hardware was tested
 
-Anything touching a hardware or IO path — QR encoding or decoding, the camera,
-the PSBT bytes a device parses, what a review screen shows — needs a plain
+Anything touching a hardware or IO path, QR encoding or decoding, the camera,
+the PSBT bytes a device parses, what a review screen shows, needs a plain
 verdict in the pull request:
 
 - **DEVICE TEST: REQUIRED**, with the exact flows to run and why, or
@@ -39,7 +39,7 @@ held the keyboard is not part of that.
 ## Comments carry the why
 
 The code says what it does. A comment is worth keeping when it explains a
-protocol rule, an invariant, or why an obvious approach is wrong — the kind of
+protocol rule, an invariant, or why an obvious approach is wrong, the kind of
 thing someone would otherwise reintroduce as a bug. Restating the next
 statement in English is not worth keeping.
 

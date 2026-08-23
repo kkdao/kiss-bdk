@@ -25,14 +25,14 @@ why that split exists.
 Reports about this repository's own code are welcome, particularly:
 
 - A verification that passes when it should not. `broadcast` checks that the
-  signer returned the transaction it was given, that the BIP-374 DLEQ proof is
-  honest, that each derived output re-derives to the script the signer wrote,
+  signing device returned the transaction it was given, that the BIP-374 DLEQ proof is
+  honest, that each derived output re-derives to the script the signing device wrote,
   and that every signature verifies against a key computed here. A way past any
   of those matters.
 - A silent payment output stored with an amount, script or outpoint the chain
   does not agree with. Amounts reach the `witness_utxo` of the spend that moves
   a coin and BIP-341 signs over them.
-- A PSBT this builds that a correct signer should refuse, or that misrepresents
+- A PSBT this builds that a correct signing device should refuse, or that misrepresents
   on screen what it will do on chain.
 - Anything that writes a scan key somewhere other than the wallet directory.
 

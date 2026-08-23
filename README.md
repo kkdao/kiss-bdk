@@ -27,7 +27,7 @@ reading further:
 | **the signing device** | the keys. It derives each silent payment output script, because only the input private keys can |
 | **a tweak source** | per-block data no ordinary block explorer serves. A [BlindBit] oracle, or a node of your own |
 
-BDK is not the server and not the signer.
+BDK is not the server and not the signing device.
 
 ## 📦 Install
 
@@ -98,7 +98,8 @@ kiss-bdk broadcast signed.psbt --original unsigned.psbt
 `broadcast` re-checks that KISS returned the transaction it was given, verifies
 every signature, and finalizes before anything reaches the network.
 
-Fees default to 2 sat/vB. On a busy test network pass `--fee-rate`.
+The fee rate comes from the backend's next-block estimate. `--fee-rate` overrides
+it.
 
 ## 🤫 Silent payments
 
@@ -190,41 +191,24 @@ prints the address and the links instead of pretending.
 ## 🔌 Testing another signing device
 
 Nothing here is tied to KISS except the QR commands. `create` writes a PSBT file
-and `broadcast` reads one back, so any signing device that can load a file
-will do.
+and `broadcast` reads one back, so any device that can load a file will do,
+whether it ships BIP-375 and BIP-376 today or you are adding them.
 
-You need a signing device that implements **BIP-375** (paying a `tsp1…` code) or
-**BIP-376** (spending what one paid you), whether it ships that today or you
-are adding it.
-
-None of this needs a node. The check runs offline, against files.
-
-**1.** Point a wallet at your signing device's descriptor:
+No node needed: the check runs offline, against files.
 
 ```sh
-kiss-bdk init --network signet --descriptor "<your signing device's descriptor>"
-```
-
-**2.** Build the transaction:
-
-```sh
+kiss-bdk init --network signet --descriptor "<your device's descriptor>"
 kiss-bdk create --to tsp1… --sats 10000 --out unsigned.psbt
-```
-
-**3.** Sign `unsigned.psbt` on your device, however it does that, and save the
-result as `signed.psbt`.
-
-**4.** Check it:
-
-```sh
+# sign unsigned.psbt on your device, save it as signed.psbt
 kiss-bdk broadcast signed.psbt --original unsigned.psbt --dry-run
 ```
 
-**5.** Fix whatever it names, and repeat.
+That last line is the point. It takes nothing on trust: same transaction back,
+DLEQ proof, re-derived output script, every signature checked against a key
+worked out here. And it names which part failed. Fix, repeat.
 
-To receive as well, pair from the two keys directly. BIP-352 does not say how a
-device should hand its scan key over, so KISS's `tspscan1…` export is its own
-format and this takes the keys raw instead:
+To receive as well, pair from the two keys directly, since BIP-352 does not say
+how a device should hand its scan key over:
 
 ```sh
 kiss-bdk sp-pair --keys SCAN_PRIVATE_HEX:SPEND_PUBLIC_HEX
@@ -233,20 +217,15 @@ kiss-bdk sp-pair --keys SCAN_PRIVATE_HEX:SPEND_PUBLIC_HEX
 64 hex digits then 66. From there `sp-address`, `sp-scan` and `--from-sp` all
 work as they do for KISS.
 
-Step 4 is the point of all this. It takes nothing on trust: same transaction
-back, DLEQ proof, re-derived output script, every signature checked against a
-key worked out here, and it says which part failed, before anything reaches
-the network.
-
 The exact bytes `create` emits are asserted in
 [tests/sp_spend_psbt.rs](tests/sp_spend_psbt.rs), so it is a specification you
 can diff against rather than a description.
 [tests/sp_spend_fixtures.rs](tests/sp_spend_fixtures.rs) writes PSBTs for a
-device's own test harness, including one whose tweak does not reproduce the
-output key, which a correct signing device must refuse.
+device's own harness, including one whose tweak does not reproduce the output
+key, which a correct device must refuse.
 
-Once you want to broadcast and scan for real, signet needs a faucet and
-ten-minute blocks. `--network regtest` against a local node has neither, and
+For a loop with no faucet and no ten-minute blocks, `--network regtest` against
+a local node has neither, and
 [tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) is a worked example.
 
 ## 🔨 Build
@@ -260,11 +239,12 @@ Needs Rust, a C compiler, and a webcam. Tested on macOS.
 
 ## 📷 QR
 
-- Computer → KISS: static Base64 PSBT QR. A PSBTv2 is larger than a v0, so
-  `create --qr` stops past roughly three inputs rather than emit a frame the
-  camera cannot read.
-- KISS → computer: animated BC-UR `crypto-psbt`.
-- Decoding uses the vendored `k_quirc`, the same decoder KISS runs.
+- Computer → device: one static Base64 PSBT QR. `--qr` picks the largest coins
+  first so a transaction uses the fewest inputs it can, since each input carries
+  its full previous transaction. Past what the camera can read, `create` says so
+  rather than emitting an unreadable frame.
+- Device → computer: animated BC-UR `crypto-psbt`.
+- Decoding uses the vendored `k_quirc`, the same decoder the device runs.
 
 ## ✅ Proof
 
@@ -289,7 +269,7 @@ Every flow below ran over the physical hardware.
 - **Silent payment change**, Signet, with both halves in one transaction:
   [56458880…e7cad3f1](https://mempool.space/signet/tx/564588801141c52bd412a69ac6b08af843724f66cbe20f75cc443436e7cad3f1),
   block 319035. BIP-376 on the input, BIP-375 on **both** outputs, paying this
-  wallet's own code so the two carry the same recipient and the signer assigns
+  wallet's own code so the two carry the same recipient and the device assigns
   them different derivation orders. On chain: a `v1_p2tr` key-path input with
   one 64-byte witness item, and two `v1_p2tr` outputs, no ordinary address
   anywhere. `sp-scan` then found both again, so the change stayed in the

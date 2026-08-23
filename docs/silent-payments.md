@@ -12,7 +12,7 @@ work out where the money is going.
 
 [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki) puts
 the recipient's two public keys in the PSBT and leaves the output script empty
-for the signer to fill in. That is also why these leave as a **PSBTv2**: a v0
+for the device to fill in. That is also why these leave as a **PSBTv2**: a v0
 carries one fixed unsigned transaction, and it cannot express an output whose
 script does not exist yet.
 
@@ -21,16 +21,16 @@ exact final size where the real output will go, and strips it on the way out.
 
 ## What is checked before broadcast
 
-Nothing the signer returns is taken on trust. `broadcast` refuses unless:
+Nothing the device returns is taken on trust. `broadcast` refuses unless:
 
 - **It is the same transaction.** Inputs, outputs, amounts, sequences, locktime
   and the modifiable flags all match what was sent.
-- **The BIP-374 DLEQ proof verifies.** This proves the ECDH share the signer
+- **The BIP-374 DLEQ proof verifies.** This proves the ECDH share the device
   used really came from the inputs being spent, rather than from a key it
   chose.
 - **Re-deriving reproduces the script.** The output is computed again here, from
-  the proof and the recipient's code, and must equal the script the signer
-  wrote. Without this a signer could pay anyone and call it your recipient.
+  the proof and the recipient's code, and must equal the script the device
+  wrote. Without this a device could pay anyone and call it your recipient.
 - **Every signature verifies**, schnorr or ECDSA, against a key worked out here
   rather than one the PSBT supplied.
 
@@ -59,19 +59,19 @@ tweak. It is a BIP-32 child of nothing and appears in no descriptor, which is
 why a wallet that only knows descriptors cannot spend it.
 
 [BIP-376](https://github.com/bitcoin/bips/blob/master/bip-0376.mediawiki) puts
-the tweak on the input as `PSBT_IN_SP_TWEAK`, and the signer adds it to the
+the tweak on the input as `PSBT_IN_SP_TWEAK`, and the device adds it to the
 spend key it kept. Two things guard that:
 
 - Every candidate is re-derived here first, and dropped unless its tweak
   reproduces the script the output actually pays.
-- The signer does the same check independently before signing, so a tampered
+- The device does the same check independently before signing, so a tampered
   tweak fails on the device as well.
 
 Change goes back into the silent payment keyspace. That puts BIP-376 on the
 inputs and BIP-375 on both outputs in one PSBT, which is the ordinary shape of
 a silent payment wallet's spend rather than a corner case. Paying your own code
 simply puts two derived outputs in one transaction, at derivation orders the
-signer assigns.
+device assigns.
 
 ## Why finding them needs a tweak source
 
@@ -94,7 +94,7 @@ data and your keys never leave.
 Between the first two, the difference is cost. BlindBit publishes a bare list of
 tweaks, so a client must fetch each block to find which transaction a tweak
 belongs to. The Electrum stream sends the txid and the taproot outputs alongside
-the tweak, so no blocks are fetched at all — 46 s against 5 m 23 s over the same
+the tweak, so no blocks are fetched at all, 46 s against 5 m 23 s over the same
 signet range.
 
 ## Why amounts are still checked against the chain
