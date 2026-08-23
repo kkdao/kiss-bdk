@@ -4,14 +4,6 @@
 
 # KISS-BDK
 
-<p align="center">
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
-  <img alt="Rust" src="https://img.shields.io/badge/rust-2024_edition-orange.svg">
-  <img alt="Silent payments" src="https://img.shields.io/badge/BIP--352%20%7C%20375%20%7C%20376-silent%20payments-8A2BE2.svg">
-  <img alt="Networks" src="https://img.shields.io/badge/testnet4%20%7C%20signet%20%7C%20mutinynet%20%7C%20regtest-green.svg">
-  <a href="https://t.me/DIYbitcoin"><img alt="Telegram" src="https://img.shields.io/badge/chat-DIY%20Bitcoin-2CA5E0.svg?logo=telegram&logoColor=white"></a>
-</p>
-
 **Air-gapped Bitcoin transactions powered by BDK**
 
 An experimental Rust coordinator for the Bitcoin test networks. BDK runs the
