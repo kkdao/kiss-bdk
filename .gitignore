@@ -2,5 +2,6 @@
 /kiss-bdk-wallet/
 /hackathon-demo/
 /mutiny-demo/
+/signet-live/
 *.psbt
 *-qr.png

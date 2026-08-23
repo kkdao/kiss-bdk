@@ -174,6 +174,44 @@ sign in once at <https://faucet.mutinynet.com/>, then pass `--token` or export
 `MUTINYNET_FAUCET_TOKEN`. Testnet4 and Signet faucets are Turnstile-protected,
 so the command prints the address and the links instead of pretending.
 
+## Testing another signer
+
+KISS is the signer this was written for, not the only one it can talk to. The
+QR path is the part that is specific to it; the file path is not, and everything
+worth borrowing lives there.
+
+```sh
+kiss-bdk create --to tsp1… --sats 10000 --out unsigned.psbt   # BIP-375
+kiss-bdk create --to tb1q… --sats 10000 --from-sp --out unsigned.psbt   # BIP-376
+# sign unsigned.psbt however your device does it, into signed.psbt
+kiss-bdk broadcast signed.psbt --original unsigned.psbt --dry-run
+```
+
+`create` emits the PSBTv2 shape both drafts call for, down to the key types —
+`0x20` for the tweak, `0x1f` for the spend key's origin, and no
+`PSBT_IN_BIP32_DERIVATION` on a silent payment input, which breaks signing on at
+least one implementation. The exact per-input key set is asserted on the
+serialized bytes in [tests/sp_spend_psbt.rs](tests/sp_spend_psbt.rs), so it is
+a specification you can diff against rather than a description.
+
+`broadcast --dry-run` is the half that makes it a test rig. It takes nothing on
+trust: it checks the signer returned the same transaction it was given, verifies
+the BIP-374 DLEQ proof, re-derives each silent payment output and compares it to
+the script the signer wrote, and verifies every signature — schnorr or ECDSA —
+against a key worked out locally. A signer that gets any of it wrong is told
+which part, before anything reaches the network.
+
+For a loop with no faucet and no waiting, `--network regtest` against a local
+node works end to end;
+[tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) is a worked example that
+mines its own coin, pays a silent payment to itself and finds it again.
+
+Two fixture helpers exist for driving a device from files:
+[tests/sp_spend_fixtures.rs](tests/sp_spend_fixtures.rs) writes BIP-376 PSBTs
+for a signer's own host harness — including one whose tweak does not reproduce
+the output key, which must be refused — and reads the signed results back
+through the same verify → finalize → extract path `broadcast` uses.
+
 ## Build
 
 ```sh
@@ -208,6 +246,22 @@ Every flow below ran over the physical hardware.
   One `v1_p2tr` key-path input, one 64-byte signature — the shape a BIP-376
   spend must have, since the key is `spend + tweak` with no taproot tweak on
   top.
+- **The whole loop**, Signet, against a node of this wallet's own. Received and
+  then spent again, with nothing asked of anyone else:
+  1. KISS derived and signed a payment to this wallet's own `tsp1` code —
+     [339b903e…df21d3fb](https://mempool.space/signet/tx/339b903ee339a864a6e54dfc87c459f86fc213ec319568edfbdfcb3adf21d3fb),
+     block 319011.
+  2. `sp-scan --electrum` found it through that node's BIP-352 index, fetching
+     no blocks.
+  3. KISS spent it back —
+     [e6543ce2…2dd18560](https://mempool.space/signet/tx/e6543ce27be85b688e57dd57d75de92450ecbb138c5ea443e0d0de6a2dd18560),
+     block 319014, reported as `1 silent payment, 0 ECDSA` and landing on chain
+     as a `v1_p2tr` key-path input with one 64-byte witness item and an empty
+     `scriptSig`.
+
+  On the device's details screen that input reads `m/352'/1'/0'` with a silent
+  payment marker rather than a BIP-32 path, which is the only part of this
+  nothing off the device can check.
 
 The tweak stream needs no signer and no hardware, so it is proven twice over
 instead — against a full signet archive, and against a chain small enough to
