@@ -12,7 +12,11 @@
 name: attribution
 
 on:
+  # A pull request branch lives in this repository, so an unfiltered `push`
+  # runs every check twice: once for the branch and once for the pull request
+  # opened from it. Only main needs the push trigger.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
