@@ -27,7 +27,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `cc` builds the vendored k_quirc decoder. nokhwa's native backend links
       # v4l on Linux even with no camera attached, and its bindgen step needs
@@ -63,7 +63,7 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -82,7 +82,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Run the tool rather than the action wrapping it. The wrapper reports by
       # creating a check run, which needs a write-scoped token it is not given
       # on a fork's pull request, so it fails on the report rather than on the
