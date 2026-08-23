@@ -964,31 +964,105 @@ fn parse_next_block_estimate(body: &str) -> Result<u64> {
     Ok(rate.ceil() as u64)
 }
 
+/// What a stored silent payment output is actually worth right now.
+///
+/// The store is a record of what a scan found, not of what is still there. Two
+/// things move underneath it and neither walks backwards into the table: a coin
+/// gets spent, and a transaction seen in the mempool gets replaced before it is
+/// ever mined. `create --from-sp` asks the chain about both and quietly drops
+/// them, so a spend is correct — but a total that counts them is not, and it is
+/// the total someone plans a payment against.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    Spendable,
+    Spent,
+    /// Seen in the mempool and not mined. Until it is, its tweak describes a
+    /// coin that stops existing if the transaction is replaced.
+    Unconfirmed,
+    /// The backend has never heard of it: replaced before it was mined, or its
+    /// funding transaction reorged out.
+    Gone,
+    /// The backend could not be reached, so the store's own word is all there is.
+    Unchecked,
+}
+
+impl Standing {
+    fn label(self) -> &'static str {
+        match self {
+            Standing::Spendable => "spendable",
+            Standing::Spent => "spent",
+            Standing::Unconfirmed => "unconfirmed",
+            Standing::Gone => "not on chain",
+            Standing::Unchecked => "unverified",
+        }
+    }
+}
+
+/// Split from the lookup so the rules can be tested without a backend.
+///
+/// `spent` is asked first: a spent output is spent whatever the store thinks its
+/// height is, and reporting it as merely unconfirmed would invite a retry.
+fn classify(stored_height: u32, spent: Option<bool>) -> Standing {
+    match spent {
+        None => Standing::Gone,
+        Some(true) => Standing::Spent,
+        Some(false) if stored_height == spscan::UNCONFIRMED => Standing::Unconfirmed,
+        Some(false) => Standing::Spendable,
+    }
+}
+
+fn standing_of(client: &BlockingClient, out: &spstore::StoredOut) -> Standing {
+    match client.get_output_status(&out.outpoint.txid, u64::from(out.outpoint.vout)) {
+        Ok(status) => classify(out.height, status.map(|status| status.spent)),
+        Err(_) => Standing::Unchecked,
+    }
+}
+
 fn sp_balance(wallet_dir: &Path) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
     let (mut connection, _wallet) = open_wallet(wallet_dir, &config, chain)?;
     spstore::migrate(&mut connection)?;
 
     let outputs = spstore::outputs(&connection)?;
-    let total: u64 = outputs.iter().map(|out| out.amount.to_sat()).sum();
     println!("network: {}", chain.label());
     match spstore::watermark(&connection)? {
         Some(height) => println!("scanned to: {height}"),
         None => println!("scanned to: never (run sp-scan)"),
     }
+
+    let client = esplora(&config);
+    let mut spendable = 0_u64;
+    let mut stale = 0_usize;
     for out in &outputs {
+        let standing = standing_of(&client, out);
         let seen = if out.height == spscan::UNCONFIRMED {
-            "unconfirmed".to_string()
+            String::new()
         } else {
-            format!("block {}", out.height)
+            format!(", block {}", out.height)
         };
-        println!("{} sats at {} ({seen})", out.amount.to_sat(), out.outpoint);
+        match standing {
+            Standing::Spendable | Standing::Unchecked => spendable += out.amount.to_sat(),
+            _ => stale += 1,
+        }
+        println!(
+            "{} sats at {} ({}{seen})",
+            out.amount.to_sat(),
+            out.outpoint,
+            standing.label()
+        );
     }
-    println!("silent payment total: {total} sats");
+
+    println!("spendable: {spendable} sats");
+    if stale > 0 {
+        println!(
+            "{stale} output(s) above are no longer yours to spend and are not counted; \
+             create --from-sp drops them too"
+        );
+    }
     // Worth saying here rather than only in the error: these coins are spent on
     // their own, so a reader comparing this total against the wallet balance
     // does not conclude the two add up.
-    if !outputs.is_empty() {
+    if spendable > 0 {
         println!("spend with: create --from-sp (silent payments are never mixed");
         println!("            with ordinary coins in one transaction)");
     }
@@ -1876,5 +1950,24 @@ mod tests {
         assert!(parse_next_block_estimate(r#"{"1":0}"#).is_err());
         assert!(parse_next_block_estimate(r#"{"1":-3}"#).is_err());
         assert!(parse_next_block_estimate("<!DOCTYPE html>").is_err());
+    }
+
+    /// A spent output stays spent whatever height the store recorded, and an
+    /// output the backend has never heard of is not merely unconfirmed: that is
+    /// what a replaced transaction looks like, and it never confirms.
+    #[test]
+    fn an_outputs_standing_follows_the_chain_not_the_store() {
+        assert!(matches!(classify(319_011, Some(false)), Standing::Spendable));
+        assert!(matches!(classify(319_011, Some(true)), Standing::Spent));
+        assert!(matches!(
+            classify(spscan::UNCONFIRMED, Some(false)),
+            Standing::Unconfirmed
+        ));
+        assert!(matches!(classify(spscan::UNCONFIRMED, None), Standing::Gone));
+        // Spent wins over a height the store never updated.
+        assert!(matches!(
+            classify(spscan::UNCONFIRMED, Some(true)),
+            Standing::Spent
+        ));
     }
 }

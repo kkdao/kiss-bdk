@@ -236,7 +236,10 @@ fn sp_balance_reports_an_empty_wallet_without_a_scan() {
     let (ok, stdout, stderr) = run(&wallet_dir, &["sp-balance"]);
     assert!(ok, "{stderr}");
     assert!(stdout.contains("never"), "{stdout}");
-    assert!(stdout.contains("silent payment total: 0 sats"), "{stdout}");
+    // "spendable" rather than a stored total: the store records what a scan
+    // found, and a coin can be spent or replaced afterwards without the table
+    // ever hearing about it.
+    assert!(stdout.contains("spendable: 0 sats"), "{stdout}");
 }
 
 #[test]
