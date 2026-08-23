@@ -5,8 +5,9 @@ use std::{error, fmt};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use bdk_wallet::bitcoin::Psbt;
+use image::codecs::gif::{GifEncoder, Repeat};
 use image::codecs::png::PngEncoder;
-use image::{ColorType, ImageEncoder, Luma};
+use image::{ColorType, Delay, Frame, ImageEncoder, Luma, RgbaImage};
 use nokhwa::pixel_format::LumaFormat;
 #[cfg(any(target_os = "macos", test))]
 use nokhwa::utils::CameraFormat;
@@ -15,7 +16,7 @@ use nokhwa::{Camera, nokhwa_initialize};
 use qrcode::QrCode;
 use qrcode::types::{EcLevel, Version};
 use ur::ur::Kind as UrKind;
-use ur::{Decoder as UrDecoder, decode as decode_ur};
+use ur::{Decoder as UrDecoder, Encoder as UrEncoder, decode as decode_ur};
 
 use crate::k_quirc::Decoder as QrDecoder;
 
@@ -47,6 +48,131 @@ pub fn render_psbt_png(psbt: &Psbt) -> Result<Vec<u8>> {
 pub fn render_psbt_bytes_png(psbt: &[u8]) -> Result<Vec<u8>> {
     let payload = base64::engine::general_purpose::STANDARD.encode(psbt);
     render_payload_png(&payload)
+}
+
+/// How long each frame of an animated QR is shown.
+///
+/// A camera needs a whole frame in one exposure, and the decoder needs a few
+/// repeats to recover a fountain-coded part it missed. Faster than this and a
+/// phone-class sensor starts dropping frames; slower and a long PSBT takes
+/// visibly forever.
+const UR_FRAME_DELAY_MS: u32 = 250;
+
+/// Largest fragment tried first, then halved until every frame fits the camera.
+const UR_FRAGMENT_START: usize = 200;
+
+/// Render a PSBT as an animated `crypto-psbt` QR.
+///
+/// A single static frame can only carry so much, and a PSBT with more than a
+/// couple of inputs exceeds it: each input drags its full previous transaction
+/// along. BC-UR splits the message into parts the device reassembles, which is
+/// the same encoding it already uses coming back the other way.
+///
+/// The fragment size is chosen by trying: too large and a part will not fit the
+/// camera's QR version, so it halves until every frame does. That is cheaper
+/// than predicting the interaction between bytewords, CBOR framing and QR
+/// alphanumeric mode, and it cannot be wrong the way a fixed guess can.
+pub fn render_psbt_bytes_animated_gif(psbt: &[u8]) -> Result<Vec<u8>> {
+    if psbt.len() > MAX_PSBT_BYTES {
+        bail!(
+            "PSBT is {} bytes; KISS accepts at most {MAX_PSBT_BYTES}",
+            psbt.len()
+        );
+    }
+    let cbor = cbor_byte_string(psbt);
+
+    let mut fragment = UR_FRAGMENT_START;
+    loop {
+        match ur_frames(&cbor, fragment) {
+            Ok(frames) => return encode_gif(&frames),
+            Err(_) if fragment > 16 => fragment /= 2,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Every part of the message, each already checked to fit the camera.
+fn ur_frames(cbor: &[u8], fragment: usize) -> Result<Vec<QrCode>> {
+    let mut encoder = UrEncoder::new(cbor, fragment, "crypto-psbt")
+        .map_err(|error| anyhow!("encoding the PSBT as a UR: {error}"))?;
+    let count = encoder.fragment_count();
+    if count > MAX_UR_FRAGMENTS as usize {
+        bail!("PSBT needs {count} QR frames; KISS accepts at most {MAX_UR_FRAGMENTS}");
+    }
+
+    let mut frames = Vec::with_capacity(count);
+    for _ in 0..count {
+        // Uppercase so the QR encoder can use alphanumeric mode, which is
+        // denser than bytes. BC-UR is case insensitive by design.
+        let part = encoder
+            .next_part()
+            .map_err(|error| anyhow!("building a UR part: {error}"))?
+            .to_ascii_uppercase();
+        let code = QrCode::with_error_correction_level(part.as_bytes(), EcLevel::M)
+            .context("encoding a UR part as QR")?;
+        match code.version() {
+            Version::Normal(version) if version <= MAX_KISS_QR_VERSION => {}
+            Version::Normal(version) => bail!(
+                "a frame needs QR version {version}; the camera supports at most {MAX_KISS_QR_VERSION}"
+            ),
+            Version::Micro(_) => bail!("a UR part unexpectedly encoded as a Micro QR"),
+        }
+        frames.push(code);
+    }
+    Ok(frames)
+}
+
+/// One looping GIF, so opening the file is all it takes to show the sequence.
+fn encode_gif(frames: &[QrCode]) -> Result<Vec<u8>> {
+    let mut gif = Vec::new();
+    {
+        let mut encoder = GifEncoder::new(&mut gif);
+        encoder
+            .set_repeat(Repeat::Infinite)
+            .context("setting the QR animation to loop")?;
+        for code in frames {
+            let rendered = code
+                .render::<Luma<u8>>()
+                .quiet_zone(true)
+                .min_dimensions(512, 512)
+                .build();
+            // GIF wants colour, and every pixel here is black or white.
+            let mut image = RgbaImage::new(rendered.width(), rendered.height());
+            for (to, from) in image.pixels_mut().zip(rendered.pixels()) {
+                let value = from.0[0];
+                *to = image::Rgba([value, value, value, 255]);
+            }
+            encoder
+                .encode_frame(Frame::from_parts(
+                    image,
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(UR_FRAME_DELAY_MS, 1),
+                ))
+                .context("writing a QR animation frame")?;
+        }
+    }
+    Ok(gif)
+}
+
+/// Wrap raw bytes as a CBOR byte string, which is what `crypto-psbt` carries.
+fn cbor_byte_string(bytes: &[u8]) -> Vec<u8> {
+    let mut out = match bytes.len() {
+        len @ 0..=23 => vec![0x40 | len as u8],
+        len @ 24..=255 => vec![0x58, len as u8],
+        len @ 256..=65535 => {
+            let mut header = vec![0x59];
+            header.extend_from_slice(&(len as u16).to_be_bytes());
+            header
+        }
+        len => {
+            let mut header = vec![0x5a];
+            header.extend_from_slice(&(len as u32).to_be_bytes());
+            header
+        }
+    };
+    out.extend_from_slice(bytes);
+    out
 }
 
 /// Scan the first static QR from the selected webcam and return its text.
@@ -772,5 +898,54 @@ mod tests {
         oversized_raw[..5].copy_from_slice(b"psbt\xff");
         let oversized = base64::engine::general_purpose::STANDARD.encode(oversized_raw);
         assert!(decoder.receive(&oversized).is_err());
+    }
+
+    /// A PSBT too large for one frame must still be sendable. Before this it
+    /// simply refused, and a three-input transaction is not exotic: each input
+    /// carries its whole previous transaction.
+    #[test]
+    fn a_psbt_too_big_for_one_frame_becomes_an_animation() {
+        let big = vec![0x5a_u8; 2000];
+        assert!(
+            render_psbt_bytes_png(&big).is_err(),
+            "this fixture only means something if one frame cannot hold it"
+        );
+
+        let gif = render_psbt_bytes_animated_gif(&big).unwrap();
+        assert_eq!(&gif[..6], b"GIF89a");
+        let frames = gif.windows(3).filter(|w| w == b"\x21\xf9\x04").count();
+        assert!(frames > 1, "an animation needs more than one frame");
+    }
+
+    #[test]
+    fn a_small_psbt_still_animates_in_a_single_frame() {
+        let gif = render_psbt_bytes_animated_gif(&[0x11; 40]).unwrap();
+        assert_eq!(&gif[..6], b"GIF89a");
+    }
+
+    #[test]
+    fn a_psbt_past_the_signing_buffer_is_refused_rather_than_split() {
+        let error = render_psbt_bytes_animated_gif(&vec![0u8; MAX_PSBT_BYTES + 1])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&MAX_PSBT_BYTES.to_string()), "{error}");
+    }
+
+    /// The frames must be what the device already knows how to reassemble, so
+    /// they go back through this repo's own decoder.
+    #[test]
+    fn the_frames_round_trip_through_the_decoder() {
+        let psbt: Vec<u8> = (0..1500u32).map(|i| (i % 251) as u8).collect();
+        let cbor = cbor_byte_string(&psbt);
+        let frames = ur_frames(&cbor, 100).unwrap();
+        assert!(frames.len() > 1);
+
+        let mut encoder = UrEncoder::new(&cbor, 100, "crypto-psbt").unwrap();
+        let mut decoder = UrDecoder::default();
+        while !decoder.complete() {
+            decoder.receive(&encoder.next_part().unwrap()).unwrap();
+        }
+        let message = decoder.message().unwrap().unwrap();
+        assert_eq!(&message[message.len() - psbt.len()..], &psbt[..]);
     }
 }

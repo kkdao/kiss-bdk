@@ -19,7 +19,10 @@ use bdk_wallet::{KeychainKind, SignOptions, Wallet};
 use clap::{Parser, Subcommand, ValueEnum};
 use kiss_bdk::blindbit;
 use kiss_bdk::electrum;
-use kiss_bdk::qr::{render_psbt_bytes_png, scan_descriptor, scan_scan_key, scan_signed_psbt_bytes};
+use kiss_bdk::qr::{
+    render_psbt_bytes_animated_gif, render_psbt_bytes_png, scan_descriptor, scan_scan_key,
+    scan_signed_psbt_bytes,
+};
 use kiss_bdk::sp::{self, SilentPaymentAddress};
 use kiss_bdk::spreceive;
 use kiss_bdk::spscan;
@@ -1362,14 +1365,18 @@ fn create_psbt(
     if out.exists() {
         bail!("{} already exists; refusing to overwrite it", out.display());
     }
-    let qr_path = qr.then(|| qr_image_path(out));
-    if let Some(path) = &qr_path
-        && path.exists()
-    {
-        bail!(
-            "{} already exists; refusing to overwrite it",
-            path.display()
-        );
+    // Either extension may be written, depending on whether one frame is
+    // enough, so neither may already be there.
+    if qr {
+        for extension in ["png", "gif"] {
+            let path = qr_image_path(out, extension);
+            if path.exists() {
+                bail!(
+                    "{} already exists; refusing to overwrite it",
+                    path.display()
+                );
+            }
+        }
     }
     let (config, chain) = load_config(wallet_dir)?;
     let recipient = parse_destination(destination, chain)?;
@@ -1492,12 +1499,25 @@ fn create_psbt(
             "KISS-signed PSBT may grow to {estimated_signed_size} bytes; its signing buffer holds at most {KISS_MAX_SIGNED_PSBT_BYTES}"
         );
     }
-    let qr_png = qr.then(|| render_psbt_bytes_png(&serialized)).transpose()?;
+    // One static frame if it fits, an animated one if it does not. A PSBT with
+    // more than a couple of inputs outgrows a single frame because each input
+    // carries its whole previous transaction, and the device's decoder handles
+    // multi-part input already.
+    let rendered = match qr {
+        false => None,
+        true => Some(match render_psbt_bytes_png(&serialized) {
+            Ok(png) => (qr_image_path(out, "png"), png),
+            Err(_) => (
+                qr_image_path(out, "gif"),
+                render_psbt_bytes_animated_gif(&serialized)?,
+            ),
+        }),
+    };
     // finish() reserves a change address; persist before handing the PSBT out.
     wallet.persist(&mut connection)?;
     write_new_file(out, &serialized)?;
-    if let (Some(path), Some(png)) = (&qr_path, qr_png) {
-        write_new_file(path, &png)?;
+    if let Some((path, bytes)) = &rendered {
+        write_new_file(path, bytes)?;
     }
 
     // `calculate_fee` walks the wallet's own tx graph, which has never seen a
@@ -1531,9 +1551,16 @@ fn create_psbt(
     println!("fee: {} sats", fee.to_sat());
     println!("PSBT size: {psbt_size} bytes");
     println!("worst-case signed size: {estimated_signed_size} bytes");
-    if let Some(path) = qr_path {
-        println!("On KISS: SIGN → SCAN QR. Scan the QR opened on the computer:");
-        open_qr_image(&path);
+    if let Some((path, _)) = &rendered {
+        let animated = path.extension().is_some_and(|kind| kind == "gif");
+        if animated {
+            println!(
+                "On KISS: SIGN → SCAN QR. Hold the camera on the animation until it completes:"
+            );
+        } else {
+            println!("On KISS: SIGN → SCAN QR. Scan the QR opened on the computer:");
+        }
+        open_qr_image(path);
         println!(
             "After KISS signs: kiss-bdk --wallet-dir {} scan --original {} --out signed.psbt",
             wallet_dir.display(),
@@ -1661,13 +1688,13 @@ fn parse_destination(destination: &str, chain: Chain) -> Result<Destination> {
     Ok(Destination::Address(address))
 }
 
-fn qr_image_path(psbt_path: &Path) -> PathBuf {
+fn qr_image_path(psbt_path: &Path, extension: &str) -> PathBuf {
     let stem = psbt_path
         .file_stem()
         .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| std::ffi::OsStr::new("unsigned"));
     let mut name = stem.to_os_string();
-    name.push("-qr.png");
+    name.push(format!("-qr.{extension}"));
     psbt_path.with_file_name(name)
 }
 

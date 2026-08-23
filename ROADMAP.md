@@ -29,11 +29,6 @@ Then: the same receive-and-spend loop, at 30 seconds a block.
 
 ## Next
 
-**Animated QR from computer to device.** `--qr` now selects largest-first, so a
-transaction uses the fewest inputs it can and the frame stays readable. That is
-a smaller budget than it needs to be: the device's decoder already handles
-multi-part input, and only this side is still single-frame.
-
 **Labels.** BIP-352 labelled addresses. The scanner passes an empty label map
 today, which is correct for one published code and wrong the moment there are
 two.

@@ -31,7 +31,7 @@ Inside the coordinator, silent payments are not one library's job:
 | **`bdk_sp`** | the BIP-352 maths: deriving a silent payment output, and testing a block's tweaks against a scan key |
 | **kiss-bdk** | what neither covers: the BIP-375 and BIP-376 PSBT fields, verifying what the device returns, the QR transport, and the tweak clients |
 | **the signing device** | the keys. It derives each silent payment output script, because only the input private keys can |
-| **a tweak source** | per-block data no block explorer serves. A [BlindBit] oracle, or a node of your own |
+| **a tweak source** | per-block data no block explorer serves. A [BlindBit] oracle, or your own [rbitcoin] node |
 
 BDK is the wallet library, not the server and not the signing device.
 
@@ -245,10 +245,9 @@ Needs Rust, a C compiler, and a webcam. Tested on macOS.
 
 ## 📷 QR
 
-- Computer → device: one static Base64 PSBT QR. `--qr` picks the largest coins
-  first so a transaction uses the fewest inputs it can, since each input carries
-  its full previous transaction. Past what the camera can read, `create` says so
-  rather than emitting an unreadable frame.
+- Computer → device: one static Base64 PSBT QR when it fits, and an animated
+  BC-UR `crypto-psbt` GIF when it does not. `--qr` also picks the largest coins
+  first, so a transaction uses the fewest inputs it can.
 - Device → computer: animated BC-UR `crypto-psbt`.
 - Decoding uses the vendored `k_quirc`, the same decoder the device runs.
 
@@ -289,6 +288,18 @@ the difference in cost.
 [tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) runs the whole thing
 unattended against a local node: mines a coin, pays a real silent payment to
 itself, and finds it again knowing only the recipient's keys.
+
+## 🙏 Built on
+
+- [BDK](https://github.com/bitcoindevkit/bdk_wallet) and
+  [bdk_sp](https://github.com/bitcoindevkit/bdk-sp), which do the wallet and the
+  BIP-352 maths
+- [rbitcoin](https://github.com/reardencode/rbitcoin) by
+  [@reardencode](https://github.com/reardencode), the node serving the tweak
+  stream. Signet scanning here runs against it today
+- [BlindBit](https://github.com/setavenger/blindbit-oracle), the oracle used
+  when you have no node of your own
+- [k_quirc](vendor/k_quirc), the QR decoder shared with the signing device
 
 ## 💬 Community
 
