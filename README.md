@@ -6,166 +6,131 @@
 
 **Air-gapped Bitcoin transactions powered by BDK**
 
-KISS-BDK is an experimental Rust coordinator for the Bitcoin test networks —
-Testnet4 and Signet. Bitcoin Dev Kit manages the online, watch-only wallet while
-KISS, an air-gapped hardware signer written in C, keeps the private keys offline
-and approves signatures.
+An experimental Rust coordinator for the Bitcoin test networks. BDK runs the
+online watch-only wallet; KISS, an air-gapped C signer, holds the keys and
+approves signatures. They only ever talk in QR codes.
 
-## Live flow
+```text
+Testnet4 / Signet / Mutinynet ↔ Esplora ↔ Rust + BDK ↔ QR ↔ KISS
+```
 
 `Pair` → `Sync` → `Build` → `Sign` → `Verify` → `Broadcast`
 
-- **BDK** manages the descriptor, addresses, wallet state, coin selection,
-  fees, change, PSBT creation, finalization, and broadcasting.
-- **KISS** verifies the transaction offline, signs it, and returns the signed
-  PSBT as animated BC-UR QR.
-
-```text
-Testnet4 or Signet / Esplora ↔ Rust + BDK ↔ PSBT over QR ↔ KISS C signer
-```
-
-## What BDK does
-
-The coordinator uses:
-
-- `bdk_wallet` for the watch-only descriptor wallet, receive/change derivation,
-  SQLite persistence, balances, UTXOs, transaction building, and PSBT
-  finalization.
-- `bdk_esplora` for chain scanning and transaction broadcasting over HTTPS.
-- `bdk_sp`, BDK's experimental silent payments crate, for BIP-352 receiving.
-
-BDK is the wallet engine, not the network server and not the signer.
+BDK does the wallet work — descriptors, addresses, coin selection, fees,
+change, PSBTs, finalization, broadcast — via `bdk_wallet`, `bdk_esplora` and
+`bdk_sp`. It is not the server and not the signer.
 
 ## Networks
 
-Choose one at `init`; it is fixed for the life of that wallet directory.
+Chosen at `init` and fixed for the life of that wallet directory.
+
+| `--network` | Default Esplora | Faucet |
+| --- | --- | --- |
+| `testnet4` (default) | `https://mempool.space/testnet4/api` | browser only |
+| `signet` | `https://mempool.space/signet/api` | browser only |
+| `mutinynet` | `https://mutinynet.com/api` | `kiss-bdk faucet --token …` |
+
+All three are BIP-44 coin type `1h`, so one KISS descriptor derives the same
+addresses on all of them — which also means a `tb1…` address is valid on every
+one and nothing can tell them apart. Keep one `--wallet-dir` per network.
+
+Mutinynet's blocks are ~30 seconds apart, so it is the one to demo on. Mainnet
+and regtest are not selectable. Override the backend with `--esplora URL`.
+
+## Quick start
+
+On KISS: enable Testnet, unlock, then **PAIR COORDINATOR → DESKTOP**.
 
 ```sh
-kiss-bdk init --network signet --scan-qr
+kiss-bdk init --network mutinynet --scan-qr
+kiss-bdk sync
+kiss-bdk address
 ```
 
-| `--network` | Chain | Default Esplora | Faucet |
-| --- | --- | --- | --- |
-| `testnet4` (default) | Testnet4 | `https://mempool.space/testnet4/api` | browser only |
-| `signet` | Signet (BIP-325) | `https://mempool.space/signet/api` | browser only |
-| `mutinynet` | Mutinynet, a custom signet | `https://mutinynet.com/api` | `kiss-bdk faucet` (needs a token) |
+Fund that address, `sync` again, then send:
 
-The signer needs no change for any of them. Its account is BIP-44 coin type
-`1h`, the keyspace shared by the whole Bitcoin test family, so one KISS
-descriptor derives the same addresses on all three. Mutinynet is a separate
-chain from the default signet despite sharing its address format; its blocks
-are about 30 seconds apart, so a demo confirmation arrives while you are still
-on stage.
+```sh
+kiss-bdk create --to tb1q… --sats 10000 --qr
+```
 
-Mainnet and regtest are not selectable. Override the backend with
-`--esplora URL` at `init` if you would rather use your own.
+On KISS choose **SIGN → SCAN QR**, review, sign. While it displays the animated
+signed QR:
 
-Because all three share one address format, a `tb1...` address is valid on every
-one of them and neither this CLI nor KISS can tell them apart. Keep one
-`--wallet-dir` per network; a wallet directory is pinned to the network it was
-created on, and `init` refuses to overwrite an existing one.
+```sh
+kiss-bdk scan
+kiss-bdk broadcast signed.psbt --original unsigned.psbt --dry-run
+kiss-bdk broadcast signed.psbt --original unsigned.psbt
+```
+
+`broadcast` re-checks that KISS returned the transaction it was given, verifies
+every signature, and finalizes before anything reaches the network.
 
 ## Silent payments
 
-Send to a BIP-352 address by passing it to `create`:
+### Sending to one
 
 ```sh
 kiss-bdk create --to tsp1… --sats 10000 --qr
 ```
 
-A silent payment output script is derived from the *input private keys*, so a
-watch-only wallet cannot compute it. BIP-375 carries the recipient's scan and
-spend keys in the PSBT and lets KISS fill the script in, which is why these
-transactions leave as a PSBTv2 — a v0 PSBT cannot express an output whose script
-is not yet known.
+The output script is derived from the *input private keys*, so a watch-only
+wallet cannot compute it. BIP-375 puts the recipient's keys in the PSBT and lets
+KISS fill the script in — which is why these leave as a PSBTv2, since a v0
+cannot express an output whose script is not yet known. BDK still sizes the fee
+and change against a taproot placeholder of the exact final size.
 
-BDK still does all the wallet work: it selects coins and computes change and the
-fee against a taproot placeholder of exactly the size the real output will be.
-
-A PSBTv2 is bigger than the v0 it replaces, and the unsigned QR is a single
-static frame, so `--qr` runs out of room sooner than the 16 inputs KISS itself
-allows: past roughly three inputs `create` stops rather than emit a QR the
-camera cannot read. Funding a demo wallet with one or two large UTXOs rather
-than many small ones keeps well clear of that.
-
-Nothing about that output is taken on trust. Before broadcasting, `scan` and
-`broadcast` check three things: that KISS returned the same transaction it was
-given apart from the scripts it was asked to fill in, that its BIP-374 DLEQ
-proof shows the ECDH share came from these inputs, and that re-deriving the
-output from that share reproduces the script KISS wrote. Only all three together
-show the payment reaches the address you typed.
-
-`inspect` reads either PSBT version and names the silent payment outputs.
+Nothing is trusted. Before broadcast, three things are checked: KISS returned
+the same transaction, its BIP-374 DLEQ proof shows the ECDH share came from
+these inputs, and re-deriving the output reproduces the script KISS wrote.
 
 ### Receiving
 
-Receiving needs the opposite of an address you can hand out and then watch for.
-Nothing on chain names the recipient, so a wallet has to test every block
-against its scan key, and the test needs the sum of each candidate
-transaction's input keys. Esplora will not publish that, and deriving it there
-means fetching every input of every transaction.
-
-So the scan reads the tweaks from a [BlindBit] server instead and matches them
-locally. The server learns which blocks are being scanned; it never learns which
-outputs matched, because the keys that decide that stay here.
-
 ```sh
 kiss-bdk sp-pair --scan-qr     # import KISS's scan key
-kiss-bdk sp-address            # the tsp1... code to hand out
-kiss-bdk sp-scan               # search the chain for payments
+kiss-bdk sp-address            # the tsp1… code to hand out
+kiss-bdk sp-scan               # search the chain
 kiss-bdk sp-balance            # what was found
 ```
 
-A tweak server only publishes for blocks it has indexed, so `sp-scan` cannot
-see a payment until it is mined — a wait of about ten minutes on signet. When
-the transaction is already known, `sp-scan --tx <txid>` derives the tweak here
-instead, from that transaction's own inputs, and finds the payment immediately
-whether or not it has been mined.
+Nothing on chain names the recipient, so every block has to be tested against
+the scan key. That test needs each transaction's input key sum, which Esplora
+will not serve — so tweaks come from a [BlindBit] server and are matched
+locally. The server learns which blocks you scanned, never which outputs
+matched.
 
-`sp-pair` reads the QR from KISS's **SCAN KEY** export screen.
-That export carries the scan private key and not the spend key, which is the
-split BIP-352 is built around: this coordinator can see payments to the address
-and can never move them. It is also the first secret this wallet directory has
-ever held, so the command says so. Mainnet is not a network this CLI can be
-pointed at, so it can only ever be a testnet key.
+`sp-pair` reads KISS's **SCAN KEY** export: the scan private key, never the
+spend key. This coordinator can see payments and can never move them. It is the
+only secret the wallet directory holds, and mainnet is unreachable here, so it
+can only ever be a testnet key.
 
-Signet is the only chain here with a published tweak server, the one BDK's own
-workshop uses. Point `--blindbit` at another to override it.
+A tweak server only publishes for blocks it has indexed, so `sp-scan` cannot see
+a payment until it is mined. `sp-scan --tx <txid>` derives the tweak from that
+transaction's own inputs instead and needs no server at all.
 
 ### Spending what was received
 
 ```sh
-kiss-bdk create --to tb1q... --sats 10000 --from-sp --qr
+kiss-bdk create --to tb1q… --sats 10000 --from-sp --qr
 ```
 
-A received silent payment pays `B_spend + t*G`, so its private key is the spend
-key plus the output's tweak. That is not a BIP-32 child of anything, which is
-why no descriptor holds these coins and why `--from-sp` is a separate source
-rather than part of the ordinary balance. BDK still computes the fee and the
-change; the tweak travels as BIP-376's `PSBT_IN_SP_TWEAK` and KISS adds it to
-the spend key it kept.
+A received silent payment pays `B_spend + t*G`, so its key is the spend key plus
+the output's tweak — not a BIP-32 child of anything, and in no descriptor. The
+tweak travels as BIP-376's `PSBT_IN_SP_TWEAK` and KISS adds it to the spend key
+it kept. Every candidate is re-derived here first and dropped unless its tweak
+reproduces the script the output pays; the returned Schnorr signature is
+verified against a key worked out locally.
 
-Nothing is taken on trust in either direction. Before the PSBT is written, every
-candidate is re-derived here and dropped unless the tweak reproduces the script
-the output actually pays — the same check KISS makes, so a store left over from
-a previous pairing says so by name instead of being refused across the room.
-Before broadcast, the returned Schnorr signature is verified against the key
-this coordinator worked out for itself.
+**Silent payment coins are spent on their own.** KISS refuses a transaction
+mixing them with ordinary ones: BIP-143 commits only to the amount of the input
+being signed, so a coordinator with two inputs can run two truthful signing
+sessions and combine them into a transaction paying a fee neither screen showed.
+BIP-341 hashes every input amount, so an all-taproot spend proves its own fee. A
+P2WPKH input does not. If silent payments cannot cover a payment, the ordinary
+balance cannot make up the difference.
 
-**Silent payment coins are spent on their own.** A transaction mixing them with
-ordinary ones is refused by the signer, and the reason is worth knowing: BIP-143
-commits only to the amount of the input being signed, so with two or more inputs
-a coordinator can run two individually-truthful signing sessions and combine
-them into a transaction paying a fee neither screen showed. BIP-341 hashes every
-input amount, so an all-taproot spend proves its own fee. A P2WPKH input does
-not. So if the silent payment balance cannot cover a payment, the ordinary
-balance cannot make up the difference — `create` says so rather than building
-something KISS will reject.
-
-Change goes back to an ordinary wallet address for now, which links the coin to
-the descriptor wallet. Sending change back to this wallet's own silent payment
-code needs BIP-376 inputs and BIP-375 outputs in one PSBT; the signer supports
-it and this coordinator does not yet.
+Change goes to an ordinary address for now. Keeping it in the silent payment
+keyspace needs BIP-376 inputs and BIP-375 outputs in one PSBT — the signer
+supports that shape, this does not yet.
 
 [BlindBit]: https://github.com/setavenger/blindbit-oracle
 
@@ -175,111 +140,42 @@ it and this coordinator does not yet.
 kiss-bdk faucet --sats 100000
 ```
 
-This derives the wallet's next unused receive address, prints it, and asks that
-network's faucet for coins. `--address` tops up some other address instead.
-
-No public faucet on these networks will fund an anonymous script, so what the
-command can do depends on the network:
-
-- **Mutinynet** is the only one with a callable API, and it requires an
-  `Authorization: Bearer` token. Sign in with GitHub once at
-  <https://faucet.mutinynet.com/>, then pass `--token` or export
-  `MUTINYNET_FAUCET_TOKEN` and the top-up is a single command. It sends at most
-  1,000,000 sats per request. The token is never printed or persisted.
-- **Testnet4 and Signet** faucets are all Cloudflare-Turnstile-protected, so the
-  command prints the address and the faucet links for you to paste into a
-  browser rather than pretending it can claim.
+Derives the next unused address and asks that network's faucet for coins.
+Mutinynet is the only one with a callable API, and it needs a bearer token —
+sign in once at <https://faucet.mutinynet.com/>, then pass `--token` or export
+`MUTINYNET_FAUCET_TOKEN`. Testnet4 and Signet faucets are Turnstile-protected,
+so the command prints the address and the links instead of pretending.
 
 ## Build
-
-Requirements: Rust, a C compiler, and a webcam. The current hardware flow is tested on macOS.
 
 ```sh
 cargo test --locked
 cargo build --release --locked
 ```
 
-The executable is `target/release/kiss-bdk`.
+Needs Rust, a C compiler, and a webcam. Tested on macOS.
 
-## QR-only demo
+## QR
 
-Create a fresh runtime directory:
-
-```sh
-mkdir -p hackathon-demo
-cd hackathon-demo
-```
-
-On KISS, enable Testnet, unlock the wallet, then open **PAIR COORDINATOR → DESKTOP**.
-
-```sh
-../target/release/kiss-bdk init --scan-qr
-../target/release/kiss-bdk sync
-../target/release/kiss-bdk address
-```
-
-Compare the address on KISS, fund it with that network's coins, and sync again. A pending faucet payment is sufficient for the demo.
-
-```sh
-../target/release/kiss-bdk sync
-../target/release/kiss-bdk address
-```
-
-Copy the new address as the self-send destination:
-
-```sh
-KISS_DEST='tb1q...'
-../target/release/kiss-bdk create \
-  --to "$KISS_DEST" --sats 10000 --fee-rate 2 --qr
-```
-
-On KISS choose **SIGN → SCAN QR**, review the transaction, and sign. While KISS displays the animated signed QR:
-
-```sh
-../target/release/kiss-bdk scan
-../target/release/kiss-bdk broadcast signed.psbt \
-  --original unsigned.psbt --dry-run
-../target/release/kiss-bdk broadcast signed.psbt \
-  --original unsigned.psbt
-```
-
-The CLI retains `unsigned.psbt`, confirms that KISS returned the same
-transaction, verifies the ECDSA signatures, and asks BDK to finalize it before broadcasting.
-
-## QR implementation
-
-- Computer → KISS: static Base64 PSBT QR.
-- KISS → computer: animated BC-UR `crypto-psbt` QR.
-- Desktop recognition: the vendored `k_quirc` decoder also used by KISS.
+- Computer → KISS: static Base64 PSBT QR. A PSBTv2 is larger than a v0, so
+  `create --qr` stops past roughly three inputs rather than emit a frame the
+  camera cannot read.
+- KISS → computer: animated BC-UR `crypto-psbt`.
+- Decoding uses the vendored `k_quirc`, the same decoder KISS runs.
 
 ## Proof
 
-The full physical flow produced this accepted Testnet4 transaction:
+Every flow below ran over the physical hardware.
 
-[8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659](https://mempool.space/testnet4/tx/8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659)
-
-The silent payment flow ran over the same hardware on Signet. KISS accepted the
-BIP-375 PSBTv2, derived the output script, and returned it with a DLEQ proof;
-the coordinator verified the proof, re-derived the script, and broadcast:
-
-[3a6801e9b5a7398406621299aefc8a2c915d20de612f21a26011972aa90cd12a](https://mempool.space/signet/tx/3a6801e9b5a7398406621299aefc8a2c915d20de612f21a26011972aa90cd12a)
-
-Its 10,000 sat output pays a `tsp1` address whose scan and spend keys are
-throwaway test values, so the payment can be checked from the receiving side
-too: deriving from that scan key reproduces the broadcast output script
-`tb1p74frpnrdrq2mt09xdnrje0ewvctp4g2wzra0a8xpdmuc3lhuafast97k48`.
-
-Closing the loop, a received silent payment was then spent back out over the
-same hardware on Mutinynet. The coordinator built a BIP-376 PSBTv2 carrying the
-output's tweak, KISS signed with its spend key plus that tweak, and the
-coordinator verified the returned Schnorr signature against the key it had
-re-derived for itself before finalizing it:
-
-[3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80](https://mutinynet.com/tx/3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80)
-
-Its single input is the silent payment output of
-[10aa6d1e265e24d07af34d722e86ac2e70bbd17c44a5c3704ad1c1e9677c562b](https://mutinynet.com/tx/10aa6d1e265e24d07af34d722e86ac2e70bbd17c44a5c3704ad1c1e9677c562b),
-spent as a `v1_p2tr` key path with one 64-byte signature — the shape a BIP-376
-spend has to have, since the key is `spend + tweak` and no taproot tweak is
-applied on top of it.
-
+- Ordinary send, Testnet4 —
+  [8b3473f8…3f8659](https://mempool.space/testnet4/tx/8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659)
+- Silent payment **sent**, Signet —
+  [3a6801e9…0cd12a](https://mempool.space/signet/tx/3a6801e9b5a7398406621299aefc8a2c915d20de612f21a26011972aa90cd12a).
+  Its `tsp1` recipient uses throwaway keys, so it can be checked from the
+  receiving side too: deriving from that scan key reproduces the broadcast
+  script `tb1p74frpnrdrq2mt09xdnrje0ewvctp4g2wzra0a8xpdmuc3lhuafast97k48`.
+- Silent payment **spent**, Mutinynet —
+  [3e0fdd39…54ab80](https://mutinynet.com/tx/3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80).
+  One `v1_p2tr` key-path input, one 64-byte signature — the shape a BIP-376
+  spend must have, since the key is `spend + tweak` with no taproot tweak on
+  top.
