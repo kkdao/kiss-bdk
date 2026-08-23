@@ -172,16 +172,15 @@ Nothing here is tied to KISS except the QR commands. `create` writes a PSBT file
 and `broadcast` reads one back, so any signer that can load a file will do.
 
 You need a signer that implements **BIP-375** (paying a `tsp1…` code) or
-**BIP-376** (spending what one paid you). As of writing no other signing device
-ships either — SeedSigner, Krux, Specter-DIY and Jade included — so this is
-mostly a way to build one.
+**BIP-376** (spending what one paid you) — whether it ships that today or you
+are adding it.
 
-Use regtest and you need no faucet and no waiting for blocks.
+None of this needs a node — the check runs offline, against files.
 
 **1.** Point a wallet at your signer's descriptor:
 
 ```sh
-kiss-bdk init --network regtest --descriptor "<your signer's descriptor>"
+kiss-bdk init --network signet --descriptor "<your signer's descriptor>"
 ```
 
 **2.** Build the transaction:
@@ -212,6 +211,10 @@ can diff against rather than a description.
 [tests/sp_spend_fixtures.rs](tests/sp_spend_fixtures.rs) writes PSBTs for a
 device's own test harness, including one whose tweak does not reproduce the
 output key — which a correct signer must refuse.
+
+Once you want to broadcast and scan for real, signet needs a faucet and
+ten-minute blocks. `--network regtest` against a local node has neither, and
+[tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) is a worked example.
 
 ## Build
 
