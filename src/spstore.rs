@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use bdk_wallet::bitcoin::secp256k1::{PublicKey, SecretKey};
-use bdk_wallet::bitcoin::{Amount, OutPoint, ScriptBuf, Txid};
+use bdk_wallet::bitcoin::{Amount, BlockHash, OutPoint, ScriptBuf, Txid};
 use bdk_wallet::rusqlite::{Connection, OptionalExtension, params};
 use bdk_wallet::rusqlite_impl::migrate_schema;
 use std::str::FromStr;
@@ -45,10 +45,20 @@ CREATE TABLE kiss_sp_watermark ( \
     height INTEGER NOT NULL \
 ) STRICT;";
 
+/// The hash of the block the watermark names.
+///
+/// A height alone cannot say whether the chain still agrees: a reorg replaces
+/// the block at a height without changing the number, and a scan resuming from
+/// it would step straight past a payment that moved. Nullable because a wallet
+/// scanned before this column existed has a height and no hash, which is a
+/// reason to re-check rather than to refuse.
+const SCHEMA_V1: &str = "ALTER TABLE kiss_sp_watermark ADD COLUMN hash TEXT;";
+
 /// Create the tables if they are not there yet. Safe to call on every open.
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction()?;
-    migrate_schema(&tx, SCHEMA_NAME, &[SCHEMA_V0]).context("creating silent payment tables")?;
+    migrate_schema(&tx, SCHEMA_NAME, &[SCHEMA_V0, SCHEMA_V1])
+        .context("creating silent payment tables")?;
     tx.commit()?;
     Ok(())
 }
@@ -212,27 +222,55 @@ pub fn forget(connection: &Connection, outpoint: OutPoint) -> Result<()> {
     Ok(())
 }
 
-/// The last height searched, if any.
-pub fn watermark(connection: &Connection) -> Result<Option<u32>> {
-    connection
+/// The last block searched, and the hash it had when it was searched.
+///
+/// The hash is what makes resuming safe. Without it a scan trusts a number, and
+/// a number survives a reorg that replaced everything it referred to.
+pub fn watermark(connection: &Connection) -> Result<Option<(u32, Option<BlockHash>)>> {
+    let row = connection
         .query_row(
-            "SELECT height FROM kiss_sp_watermark WHERE id = 0",
+            "SELECT height, hash FROM kiss_sp_watermark WHERE id = 0",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()
-        .context("reading the scan watermark")
+        .context("reading the scan watermark")?;
+
+    let Some((height, hash)) = row else {
+        return Ok(None);
+    };
+    let hash = match hash {
+        Some(hash) => Some(BlockHash::from_str(&hash).context("stored block hash is malformed")?),
+        None => None,
+    };
+    Ok(Some((height, hash)))
 }
 
-pub fn set_watermark(connection: &mut Connection, height: u32) -> Result<()> {
+pub fn set_watermark(connection: &mut Connection, height: u32, hash: BlockHash) -> Result<()> {
     connection
         .execute(
-            "INSERT INTO kiss_sp_watermark (id, height) VALUES (0, ?1) \
-             ON CONFLICT(id) DO UPDATE SET height = ?1",
-            params![height],
+            "INSERT INTO kiss_sp_watermark (id, height, hash) VALUES (0, ?1, ?2) \
+             ON CONFLICT(id) DO UPDATE SET height = ?1, hash = ?2",
+            params![height, hash.to_string()],
         )
         .context("recording the scan watermark")?;
     Ok(())
+}
+
+/// Forget everything found at or above `height`.
+///
+/// Called when the chain no longer agrees with what was scanned. The outputs
+/// are not necessarily gone, but where they sit is no longer known, and a
+/// re-scan of those blocks is what settles it. Idempotent: re-finding the same
+/// outpoint updates the row rather than adding one.
+pub fn forget_from(connection: &Connection, height: u32) -> Result<usize> {
+    let removed = connection
+        .execute(
+            "DELETE FROM kiss_sp_outputs WHERE height >= ?1 AND height != ?2",
+            params![height, crate::spscan::UNCONFIRMED],
+        )
+        .context("clearing silent payment outputs above a reorg")?;
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -327,14 +365,74 @@ mod tests {
         assert_eq!(stored[0].label, None);
     }
 
+    fn a_hash(byte: u8) -> BlockHash {
+        BlockHash::from_byte_array([byte; 32])
+    }
+
     #[test]
     fn the_watermark_starts_absent_and_then_advances() {
         let mut connection = connection();
         assert!(watermark(&connection).unwrap().is_none());
-        set_watermark(&mut connection, 318_745).unwrap();
-        assert_eq!(watermark(&connection).unwrap(), Some(318_745));
-        set_watermark(&mut connection, 318_800).unwrap();
-        assert_eq!(watermark(&connection).unwrap(), Some(318_800));
+        set_watermark(&mut connection, 318_745, a_hash(1)).unwrap();
+        assert_eq!(
+            watermark(&connection).unwrap(),
+            Some((318_745, Some(a_hash(1))))
+        );
+        set_watermark(&mut connection, 318_800, a_hash(2)).unwrap();
+        assert_eq!(
+            watermark(&connection).unwrap(),
+            Some((318_800, Some(a_hash(2))))
+        );
+    }
+
+    /// The hash is the whole point: a height survives a reorg that replaced
+    /// every block it referred to.
+    #[test]
+    fn the_watermark_remembers_which_block_it_scanned() {
+        let mut connection = connection();
+        set_watermark(&mut connection, 100, a_hash(9)).unwrap();
+        let (height, hash) = watermark(&connection).unwrap().unwrap();
+        assert_eq!(height, 100);
+        assert_eq!(hash, Some(a_hash(9)));
+    }
+
+    #[test]
+    fn forgetting_from_a_height_keeps_what_is_below_it() {
+        let mut connection = connection();
+        put_found(
+            &mut connection,
+            &[
+                found_fixture(0, 100),
+                found_fixture(1, 110),
+                found_fixture(2, 120),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(forget_from(&connection, 110).unwrap(), 2);
+        let left = outputs(&connection).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].height, 100);
+    }
+
+    /// An unconfirmed row has no height to compare, so a reorg says nothing
+    /// about it. `sp-balance` is what settles those.
+    #[test]
+    fn forgetting_from_a_height_leaves_unconfirmed_rows_alone() {
+        let mut connection = connection();
+        put_found(
+            &mut connection,
+            &[
+                found_fixture(0, crate::spscan::UNCONFIRMED),
+                found_fixture(1, 200),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(forget_from(&connection, 1).unwrap(), 1);
+        let left = outputs(&connection).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].height, crate::spscan::UNCONFIRMED);
     }
 
     #[test]

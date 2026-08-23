@@ -4,7 +4,11 @@ The [README](../README.md) has the commands. This is the reasoning behind them:
 why a silent payment leaves as a PSBTv2, why these coins are spent on their own,
 and what is checked before anything reaches the network.
 
-## Why the signing device derives the output
+Throughout, **the coordinator** is kiss-bdk: online, watch-only, no spending
+keys. **The signing device** is the offline one that holds them. The whole
+design is the coordinator never having to trust what the device sends back.
+
+## Why the signing device derives the output, not the coordinator
 
 A silent payment output pays a script computed from the **sender's input private
 keys** and the recipient's code. A watch-only wallet has neither, so it cannot
@@ -21,7 +25,7 @@ exact final size where the real output will go, and strips it on the way out.
 
 ## What is checked before broadcast
 
-Nothing the device returns is taken on trust. `broadcast` refuses unless:
+Nothing the signing device returns is taken on trust. `broadcast` refuses unless:
 
 - **It is the same transaction.** Inputs, outputs, amounts, sequences, locktime
   and the modifiable flags all match what was sent.

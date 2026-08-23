@@ -728,31 +728,25 @@ fn sp_scan(
     // The oracle's own height is the ceiling, not the chain tip: scanning past
     // what it has indexed would skip payments without saying so.
     let tip = blindbit.block_height()?;
-    let start = match from.or_else(|| spstore::watermark(&connection).ok().flatten()) {
-        Some(height) => height,
-        // A wallet that has never scanned has no history worth walking; a
-        // full-chain scan should be an explicit --from, not a surprise.
-        None => tip,
-    };
+    let scanner = spscan::scanner(&keys);
+    let esplora = esplora(&config);
+    let start = resume_from(&mut connection, &esplora, from, tip)?;
     if start > tip {
         bail!("the oracle has only indexed to {tip}, below the requested start {start}");
     }
-
-    let scanner = spscan::scanner(&keys);
-    let esplora = esplora(&config);
-    println!("scanning {} to {tip} via {url}...", start);
+    println!("scanning {start} to {tip} via {url}...");
 
     let mut total = 0_usize;
     for height in start..=tip {
-        let tweaks = blindbit.tweaks(height)?;
-        if tweaks.is_empty() {
-            spstore::set_watermark(&mut connection, height)?;
-            continue;
-        }
-
         let hash = esplora
             .get_block_hash(height)
             .with_context(|| format!("looking up block {height}"))?;
+        let tweaks = blindbit.tweaks(height)?;
+        if tweaks.is_empty() {
+            spstore::set_watermark(&mut connection, height, hash)?;
+            continue;
+        }
+
         let block = esplora
             .get_block_by_hash(&hash)
             .with_context(|| format!("fetching block {height}"))?
@@ -768,7 +762,7 @@ fn sp_scan(
         }
         total += found.len();
         spstore::put_found(&mut connection, &found)?;
-        spstore::set_watermark(&mut connection, height)?;
+        spstore::set_watermark(&mut connection, height, hash)?;
     }
 
     // Not "new": a rescan of the same range finds the same outputs again, and
@@ -809,18 +803,12 @@ fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Resu
     // The server's own tip, not the chain's: scanning past what it has is how a
     // payment gets skipped without anything saying so.
     let tip = server.tip_height()?;
-    let start = match from.or_else(|| spstore::watermark(&connection).ok().flatten()) {
-        Some(height) => height,
-        // A wallet that has never scanned has no history worth walking; a
-        // full-chain scan should be an explicit --from, not a surprise.
-        None => tip,
-    };
+    let scanner = spscan::scanner(&keys);
+    let esplora = esplora(&config);
+    let start = resume_from(&mut connection, &esplora, from, tip)?;
     if start > tip {
         bail!("the server has only reached {tip}, below the requested start {start}");
     }
-
-    let scanner = spscan::scanner(&keys);
-    let esplora = esplora(&config);
     println!("scanning {start} to {tip} via {address}...");
 
     let mut total = 0_usize;
@@ -843,7 +831,13 @@ fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Resu
             total += found.len();
             spstore::put_found(&mut connection, &found)?;
         }
-        spstore::set_watermark(&mut connection, height)?;
+        // The hash is what lets the next scan tell a resumed chain from a
+        // reorganised one. Read from Esplora rather than the tweak stream,
+        // which publishes no headers.
+        let hash = esplora
+            .get_block_hash(height)
+            .with_context(|| format!("looking up block {height}"))?;
+        spstore::set_watermark(&mut connection, height, hash)?;
         last = Some(height);
         Ok(())
     })?;
@@ -1032,6 +1026,61 @@ fn standing_of(client: &BlockingClient, out: &spstore::StoredOut) -> Standing {
     }
 }
 
+/// How far back a scan will rewind when the chain disagrees with the watermark.
+///
+/// Deep enough for any reorg a test network realistically produces, shallow
+/// enough that recovering costs seconds rather than a full rescan. Beyond it a
+/// scan says so and leaves `--from` to the person running it, because silently
+/// walking back further would hide how much moved.
+const MAX_REORG_DEPTH: u32 = 20;
+
+/// Where a scan should resume, given what the chain says now.
+///
+/// The watermark records a height and the hash that height had. If the backend
+/// still reports that hash, nothing moved and the scan continues. If it reports
+/// a different one the block was replaced, and every height from there on has to
+/// be searched again: `sp-scan` only ever walks forward, so a payment that moved
+/// to another block is otherwise never found.
+///
+/// Outputs recorded at or above the fork are dropped, because where they sit is
+/// no longer known. Re-scanning restores the ones still on the chain.
+fn resume_from(
+    connection: &mut Connection,
+    esplora: &BlockingClient,
+    from: Option<u32>,
+    tip: u32,
+) -> Result<u32> {
+    if let Some(explicit) = from {
+        return Ok(explicit);
+    }
+    let Some((height, hash)) = spstore::watermark(connection)? else {
+        // Never scanned. Walking the whole chain should be asked for, not
+        // assumed, so this starts where the chain is now.
+        return Ok(tip);
+    };
+    let Some(hash) = hash else {
+        // Scanned before the hash was recorded. Nothing to compare, so take the
+        // height at its word rather than rescan a chain that is probably fine.
+        return Ok(height);
+    };
+
+    // Only one hash is recorded, so this can say *whether* the chain moved but
+    // not how far. A backend that cannot answer is not evidence of anything.
+    match esplora.get_block_hash(height) {
+        Ok(current) if current == hash => Ok(height),
+        Err(_) => Ok(height),
+        Ok(_) => {
+            let at = height.saturating_sub(MAX_REORG_DEPTH);
+            let dropped = spstore::forget_from(connection, at)?;
+            println!(
+                "block {height} is not the one that was scanned; the chain reorganised. \
+                 Resuming from {at} and rescanning {dropped} stored output(s)."
+            );
+            Ok(at)
+        }
+    }
+}
+
 fn sp_balance(wallet_dir: &Path) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
     let (mut connection, _wallet) = open_wallet(wallet_dir, &config, chain)?;
@@ -1040,7 +1089,7 @@ fn sp_balance(wallet_dir: &Path) -> Result<()> {
     let outputs = spstore::outputs(&connection)?;
     println!("network: {}", chain.label());
     match spstore::watermark(&connection)? {
-        Some(height) => println!("scanned to: {height}"),
+        Some((height, _)) => println!("scanned to: {height}"),
         None => println!("scanned to: never (run sp-scan)"),
     }
 

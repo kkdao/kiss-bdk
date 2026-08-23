@@ -16,18 +16,24 @@ keys. They only ever talk in QR codes.
 
 ## 🧩 Who does what
 
-Silent payments are not one library's job, which is worth knowing before
-reading further:
+Two machines, and neither trusts the other.
+
+**kiss-bdk is the coordinator**: online, watch-only, holds no spending keys. It
+builds transactions and checks what comes back. **The signing device** is
+offline, holds the keys, and is the only thing that can sign. QR codes are the
+only thing that crosses between them.
+
+Inside the coordinator, silent payments are not one library's job:
 
 | | |
 | --- | --- |
 | **BDK** (`bdk_wallet`) | the wallet: descriptors, addresses, coin selection, fees, change, building and finalizing PSBTs |
 | **`bdk_sp`** | the BIP-352 maths: deriving a silent payment output, and testing a block's tweaks against a scan key |
-| **this repo** | the parts neither covers: the BIP-375 and BIP-376 PSBT fields, verifying what comes back, the QR transport, and the clients that fetch tweaks |
+| **kiss-bdk** | what neither covers: the BIP-375 and BIP-376 PSBT fields, verifying what the device returns, the QR transport, and the tweak clients |
 | **the signing device** | the keys. It derives each silent payment output script, because only the input private keys can |
-| **a tweak source** | per-block data no ordinary block explorer serves. A [BlindBit] oracle, or a node of your own |
+| **a tweak source** | per-block data no block explorer serves. A [BlindBit] oracle, or a node of your own |
 
-BDK is not the server and not the signing device.
+BDK is the wallet library, not the server and not the signing device.
 
 ## 📦 Install
 
