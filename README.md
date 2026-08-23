@@ -202,30 +202,48 @@ Every flow below ran over the physical hardware.
   Its `tsp1` recipient uses throwaway keys, so it can be checked from the
   receiving side too: deriving from that scan key reproduces the broadcast
   script `tb1p74frpnrdrq2mt09xdnrje0ewvctp4g2wzra0a8xpdmuc3lhuafast97k48`.
+  Both tweak sources find it, which is what the timings below are measured on.
 - Silent payment **spent**, Mutinynet —
   [3e0fdd39…54ab80](https://mutinynet.com/tx/3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80).
   One `v1_p2tr` key-path input, one 64-byte signature — the shape a BIP-376
   spend must have, since the key is `spend + tweak` with no taproot tweak on
   top.
 
-The tweak stream is proven differently, because it needs no signer and no
-hardware — but it does need a node, and the node only serves Electrum once it
-has caught up to its peers, which for a signet archive is tens of gigabytes.
-So it is proven against a chain that reaches its tip immediately, and every part
-under test is the same code:
-[tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) mines a coinbase, spends
-it to a real BIP-352 output derived from the sender's own input key, and then —
-knowing only the recipient's keys — finds it again through
-`blockchain.tweaks.subscribe` on a live [rbitcoin] (`master` at `a5ce3b1`,
-`--shindex --sptweaks`). It also checks the node's published tweak against
-`input_hash · A` computed here, runs the whole thing a second time through the
-`sp-scan` command itself, and confirms a wallet on the wrong chain is refused.
+The tweak stream needs no signer and no hardware, so it is proven twice over
+instead — against a full signet archive, and against a chain small enough to
+keep in a test.
+
+**Signet, on a self-hosted node.** [rbitcoin] `master` at
+[`a5ce3b1`](https://github.com/reardencode/rbitcoin/commit/a5ce3b199d82329306726d1792058f3f6c950b83),
+synced to 318958 with `--shindex --sptweaks` — 19 GB. Scanning for the payment
+listed above, with `--esplora` pointed at the same node, so nothing left the
+machine:
 
 ```text
-scanning 611 to 611 via 127.0.0.1:50002...
-found 4999999000 sats at b428b1a8…af05a56d:0 in block 611
-scanned to 611; 1 silent payment output(s) in range
+scanning 318745 to 318959 via 127.0.0.1:50001...
+found 10000 sats at 3a6801e9…a90cd12a:0 in block 318745
+scanned to 318959; 1 silent payment output(s) in range
 ```
 
-Signet is the next step and needs no new code — only the disk for a full
-archive.
+The public oracle finds exactly the same output over exactly the same range —
+same outpoint, same 10000 sats, same block — which is the check that matters:
+two independent sources of the same tweaks agreeing. What differs is the cost.
+
+| | wall clock | CPU |
+| --- | --- | --- |
+| `--electrum` (own node) | **46 s** | 99% |
+| `--blindbit` (public) | **5 m 23 s** | 10% |
+
+That gap is structural rather than a matter of one being nearer. BlindBit was at
+10% CPU because it spends the time *waiting on block fetches* — one per height
+carrying any tweak. The stream sends the txid and the outputs with the tweak, so
+there are none to wait for.
+
+**Regtest, as a test that runs on its own.**
+[tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) mines a coinbase, spends
+it to a real BIP-352 output derived from the sender's own input key, and then —
+knowing only the recipient's keys — finds it again through the same stream. It
+also holds the node's published tweak against `input_hash · A` computed locally,
+repeats the whole thing through the `sp-scan` command itself, and checks that a
+wallet on the wrong chain is refused. Signet cannot be a test: a node serves
+Electrum only once it has caught up to its peers.
