@@ -7,8 +7,8 @@
 **Air-gapped Bitcoin transactions powered by BDK**
 
 An experimental Rust coordinator for the Bitcoin test networks. BDK runs the
-online watch-only wallet; KISS, an air-gapped C signer, holds the keys. They
-only ever talk in QR codes.
+online watch-only wallet; KISS, an air-gapped C signing device, holds the
+keys. They only ever talk in QR codes.
 
 `Pair` → `Sync` → `Build` → `Sign` → `Verify` → `Broadcast`
 
@@ -24,7 +24,7 @@ Chosen at `init` and fixed for that wallet directory.
 | `regtest` | `127.0.0.1:3000` | mine to the address |
 
 All four are coin type `1h`, so one descriptor derives the same addresses on all
-of them — which also means a `tb1…` address is valid on three of them and
+of them, which also means a `tb1…` address is valid on three of them and
 nothing tells them apart. Keep one `--wallet-dir` per network. Mainnet is not
 selectable. Mutinynet's 30-second blocks make it the one to demo on.
 
@@ -68,9 +68,9 @@ kiss-bdk create --to tsp1… --sats 10000 --qr
 
 The output script comes from the *input private keys*, so a watch-only wallet
 cannot compute it. BIP-375 puts the recipient's keys in the PSBT and lets the
-signer fill the script in. Three things are checked before broadcast: the same
-transaction came back, its BIP-374 DLEQ proof is valid, and re-deriving the
-output reproduces the script the signer wrote.
+signing device fill the script in. Three things are checked before broadcast:
+the same transaction came back, its BIP-374 DLEQ proof is valid, and
+re-deriving the output reproduces the script the signing device wrote.
 
 ### Receiving
 
@@ -82,7 +82,7 @@ kiss-bdk sp-balance            # what was found
 ```
 
 Nothing on chain names the recipient, so every block has to be tested against
-the scan key — and that test needs each transaction's input key sum, which
+the scan key, and that test needs each transaction's input key sum, which
 Esplora will not serve. So tweaks come from a [BlindBit] server and are matched
 locally. The server learns which blocks you scanned, never which outputs
 matched.
@@ -109,7 +109,7 @@ kiss-bdk sp-scan --electrum 127.0.0.1:50001
 
 [rbitcoin] serves the same tweaks over the Electrum protocol, so nobody has to
 be asked at all. Each tweak arrives already attached to its transaction, so
-**scanning fetches no blocks** — on signet that was 46 s against BlindBit's
+**scanning fetches no blocks**. On signet that was 46 s against BlindBit's
 5 m 23 s.
 
 It serves nothing until fully synced: signet cost 19 GB, about 1½ hours to sync
@@ -139,7 +139,7 @@ two send you tweaks and your keys never leave. That is the whole comparison.
 kiss-bdk create --to tb1q… --sats 10000 --from-sp --qr
 ```
 
-A received silent payment pays `B_spend + t*G` — the spend key plus that
+A received silent payment pays `B_spend + t*G`, the spend key plus that
 output's tweak, which is a BIP-32 child of nothing and lives in no descriptor.
 The tweak travels as BIP-376's `PSBT_IN_SP_TWEAK`, and the signature that comes
 back is verified against a key worked out locally.
@@ -162,25 +162,26 @@ kiss-bdk faucet --sats 100000
 ```
 
 Mutinynet is the only network with a callable faucet API, and it needs a bearer
-token — sign in at <https://faucet.mutinynet.com/>, then pass `--token` or export
+token. Sign in at <https://faucet.mutinynet.com/>, then pass `--token` or export
 `MUTINYNET_FAUCET_TOKEN`. The others are captcha-protected, so the command
 prints the address and the links instead of pretending.
 
-## Testing another signer
+## Testing another signing device
 
 Nothing here is tied to KISS except the QR commands. `create` writes a PSBT file
-and `broadcast` reads one back, so any signer that can load a file will do.
+and `broadcast` reads one back, so any signing device that can load a file
+will do.
 
-You need a signer that implements **BIP-375** (paying a `tsp1…` code) or
-**BIP-376** (spending what one paid you) — whether it ships that today or you
+You need a signing device that implements **BIP-375** (paying a `tsp1…` code) or
+**BIP-376** (spending what one paid you), whether it ships that today or you
 are adding it.
 
-None of this needs a node — the check runs offline, against files.
+None of this needs a node. The check runs offline, against files.
 
-**1.** Point a wallet at your signer's descriptor:
+**1.** Point a wallet at your signing device's descriptor:
 
 ```sh
-kiss-bdk init --network signet --descriptor "<your signer's descriptor>"
+kiss-bdk init --network signet --descriptor "<your signing device's descriptor>"
 ```
 
 **2.** Build the transaction:
@@ -200,9 +201,9 @@ kiss-bdk broadcast signed.psbt --original unsigned.psbt --dry-run
 
 **5.** Fix whatever it names, and repeat.
 
-Step 4 is the point of all this. It takes nothing on trust — same transaction
+Step 4 is the point of all this. It takes nothing on trust: same transaction
 back, DLEQ proof, re-derived output script, every signature checked against a
-key worked out here — and it says which part failed, before anything reaches
+key worked out here, and it says which part failed, before anything reaches
 the network.
 
 The exact bytes `create` emits are asserted in
@@ -210,7 +211,7 @@ The exact bytes `create` emits are asserted in
 can diff against rather than a description.
 [tests/sp_spend_fixtures.rs](tests/sp_spend_fixtures.rs) writes PSBTs for a
 device's own test harness, including one whose tweak does not reproduce the
-output key — which a correct signer must refuse.
+output key, which a correct signing device must refuse.
 
 Once you want to broadcast and scan for real, signet needs a faucet and
 ten-minute blocks. `--network regtest` against a local node has neither, and
@@ -237,12 +238,12 @@ Needs Rust, a C compiler, and a webcam. Tested on macOS.
 
 Every flow below ran over the physical hardware.
 
-- Ordinary send, Testnet4 —
+- Ordinary send, Testnet4:
   [8b3473f8…3f8659](https://mempool.space/testnet4/tx/8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659)
-- Silent payment **sent**, Signet —
+- Silent payment **sent**, Signet:
   [3a6801e9…0cd12a](https://mempool.space/signet/tx/3a6801e9b5a7398406621299aefc8a2c915d20de612f21a26011972aa90cd12a).
   Its recipient uses throwaway keys, so it checks from the receiving side too.
-- Silent payment **spent**, Mutinynet —
+- Silent payment **spent**, Mutinynet:
   [3e0fdd39…54ab80](https://mutinynet.com/tx/3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80).
   One `v1_p2tr` key-path input, one 64-byte signature.
 - **The whole loop**, Signet, on a node of this wallet's own: KISS signed a
@@ -254,7 +255,7 @@ Every flow below ran over the physical hardware.
   block 319014) as a `v1_p2tr` key-path input with one 64-byte witness item.
 
 Scanning the same signet range through that node and through the public BlindBit
-oracle finds the same output — same outpoint, same amount, same block. Two
+oracle finds the same output: same outpoint, same amount, same block. Two
 independent sources agreeing is the check that matters; 46 s against 5 m 23 s is
 the difference in cost.
 
