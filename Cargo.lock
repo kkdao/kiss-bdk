@@ -1579,9 +1579,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ur"
-version = "0.5.0"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1acbc2d7a0b8ead29865ca1dab358d40be91bdb6005c2ae980834c90e621480"
+checksum = "28bccbac381852c37efd0217ce8c96742e5cf22f6dbb2a4f0f51418c7f3ab980"
 dependencies = [
  "bitcoin_hashes 1.1.0",
  "crc",
