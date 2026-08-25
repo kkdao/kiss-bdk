@@ -5,3 +5,4 @@
 /signet-live/
 *.psbt
 *-qr.png
+.DS_Store
