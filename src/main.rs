@@ -907,7 +907,7 @@ fn confirm_on_chain(esplora: &BlockingClient, found: &spscan::Found) -> Result<(
 /// What the backend says the next block costs, rounded up to whole sat/vB.
 ///
 /// A fixed default is wrong in both directions: too low and the transaction
-/// sits in the mempool through block after block, which on an air-gapped flow
+/// sits in the mempool through block after block, which on an offline flow
 /// means the walk to the device was wasted; too high and every test costs more
 /// than it needs to. Neither is visible in the command's own output, so the
 /// number comes from the chain instead.

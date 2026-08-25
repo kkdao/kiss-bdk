@@ -4,21 +4,22 @@
 
 # KISS-BDK
 
-**Air-gapped Bitcoin transactions powered by BDK**
+**Offline Bitcoin signing, powered by BDK**
 
-An experimental Rust coordinator for the Bitcoin test networks. BDK runs the
-online watch-only wallet; KISS, an air-gapped C signing device, holds the
-keys. They only ever talk in QR codes.
+An experimental Rust coordinator for Bitcoin's test networks. Your keys stay
+offline on KISS, a signing device. BDK runs the watch-only wallet online. They
+talk over QR codes only.
 
 `Pair` → `Sync` → `Build` → `Sign` → `Verify` → `Broadcast`
 
 > ### 🔁 A silent payment, received and spent
 >
 > On Mutinynet this wallet paid its own `tsp1…` code, found the payment again,
-> and spent it back out. An air-gapped device signed both, over QR.
+> and spent it back out. An offline device signed both, over QR.
 >
-> The blocks, the fee estimate, the BIP-352 tweaks and the broadcast all came
-> from **a node on the same laptop**. No block explorer and no tweak server.
+> **Nobody was asked.** The blocks, the fee estimate, the scan and the
+> broadcast all came from a node on the same machine. No block explorer, no
+> Electrum server.
 >
 > Received [7844c4b7…](https://mutinynet.com/tx/7844c4b74439fbc982fb716ffd55d1295ecff254e31fd151d40766f5e5fc8a77)
 > · spent [dc87380d…](https://mutinynet.com/tx/dc87380d6921412d7ddd3026e6a9a28f6db9add57983f0f488d7d182cc7804cc)
@@ -121,9 +122,9 @@ it.
 
 ## 🤫 Silent payments
 
-One reusable code, `tsp1…`, and no address reuse. The reasoning behind all of
-this is in [docs/silent-payments.md](docs/silent-payments.md); these are the
-commands.
+One address, `tsp1…`, that you reuse forever. Each payment to it still lands on
+a different address on chain, so nothing links them. The reasoning is in
+[docs/silent-payments.md](docs/silent-payments.md); these are the commands.
 
 ### Sending to one
 
@@ -145,9 +146,9 @@ kiss-bdk sp-balance            # what was found
 ```
 
 Finding a payment means testing every block against your scan key, using data
-no block explorer serves. It comes from a [BlindBit] oracle by default and is
-matched locally, so the server learns which blocks you scanned and never which
-outputs matched.
+no block explorer serves. By default it comes from a [BlindBit] oracle. The
+matching runs locally, so that server sees which blocks you asked for, never
+which coins are yours. Run your own node and it sees nothing.
 
 `sp-pair` imports the scan key only: this wallet can see payments and can never
 move them. `sp-scan --tx <txid>` works before a payment is mined.
@@ -180,9 +181,9 @@ cargo build --release -p rbitcoin-node
 kiss-bdk sp-scan --electrum 127.0.0.1:50001
 ```
 
-[rbitcoin] serves the same data over the Electrum protocol, so nobody is asked
-at all. Each tweak arrives attached to its transaction, so **no blocks are
-fetched**: 46 s against BlindBit's 5 m 23 s over the same signet range.
+[rbitcoin] serves the same data over the Electrum protocol, so you ask nobody.
+Each tweak arrives attached to its transaction, so **no blocks are fetched**:
+46 s against BlindBit's 5 m 23 s over the same signet range.
 
 **Storage.** It does not prune, so this is a full archive: **signet is 19 GB**,
 roughly 1½ hours to sync plus 18 minutes to index. It serves nothing until that
@@ -247,9 +248,9 @@ kiss-bdk create --to tsp1… --sats 10000 --out unsigned.psbt
 kiss-bdk broadcast signed.psbt --original unsigned.psbt --dry-run
 ```
 
-That last line is the point. It takes nothing on trust: same transaction back,
-DLEQ proof, re-derived output script, every signature checked against a key
-worked out here. And it names which part failed. Fix, repeat.
+That last line is the point. It trusts nothing the device sends back: same
+transaction, DLEQ proof, re-derived output script, every signature checked
+against a key worked out here. And it names which part failed. Fix, repeat.
 
 To receive as well, pair from the two keys directly, since BIP-352 does not say
 how a device should hand its scan key over:
@@ -291,7 +292,8 @@ Needs Rust, a C compiler, and a webcam. Tested on macOS.
 
 ## ✅ Proof
 
-Every flow below ran over the physical hardware.
+Don't trust, verify. Every flow below ran on real hardware. The transactions
+are on chain.
 
 - Ordinary send, Testnet4:
   [8b3473f8…3f8659](https://mempool.space/testnet4/tx/8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659)
@@ -350,7 +352,7 @@ itself, and finds it again knowing only the recipient's keys.
 
 ## 💬 Community
 
-Silent payments, air-gapped signing devices and DIY hardware get discussed here:
+Silent payments, offline signing devices and DIY hardware get discussed here:
 
 <p align="center">
   <a href="https://t.me/DIYbitcoin"><img alt="DIY Bitcoin on Telegram" src="https://img.shields.io/badge/Telegram-DIY%20Bitcoin-2CA5E0.svg?style=for-the-badge&logo=telegram&logoColor=white"></a>
