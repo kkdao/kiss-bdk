@@ -12,6 +12,18 @@ keys. They only ever talk in QR codes.
 
 `Pair` → `Sync` → `Build` → `Sign` → `Verify` → `Broadcast`
 
+> ### 🔁 A silent payment, received and spent
+>
+> On Mutinynet this wallet paid its own `tsp1…` code, found the payment again,
+> and spent it back out. An air-gapped device signed both, over QR.
+>
+> The blocks, the fee estimate, the BIP-352 tweaks and the broadcast all came
+> from **a node on the same laptop**. No block explorer and no tweak server.
+>
+> Received [7844c4b7…](https://mutinynet.com/tx/7844c4b74439fbc982fb716ffd55d1295ecff254e31fd151d40766f5e5fc8a77)
+> · spent [dc87380d…](https://mutinynet.com/tx/dc87380d6921412d7ddd3026e6a9a28f6db9add57983f0f488d7d182cc7804cc)
+> · [how to run it](#from-a-node-of-your-own)
+
 [Roadmap](ROADMAP.md) · [How silent payments work here](docs/silent-payments.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
 ## 🧩 Who does what
@@ -176,9 +188,35 @@ fetched**: 46 s against BlindBit's 5 m 23 s over the same signet range.
 roughly 1½ hours to sync plus 18 minutes to index. It serves nothing until that
 finishes. `--network regtest` comes up in seconds.
 
-Silent payments work fully against your node today. Ordinary `sync` does not
-yet, so leave `--esplora` on a public server for now
-([rbitcoin#209](https://github.com/reardencode/rbitcoin/issues/209)).
+### Everything from your own node
+
+Point `--esplora` at the node too and no public server is left in the loop:
+
+```sh
+kiss-bdk init --network mutinynet --esplora http://127.0.0.1:3002 --scan-qr
+```
+
+Now `sync`, the fee estimate and `broadcast` all come from the same node that
+serves the tweaks. Ordinary sync needed a public server until
+[rbitcoin#209](https://github.com/reardencode/rbitcoin/issues/209) was fixed, so
+build rbitcoin from `master` rather than a release.
+
+### Mutinynet on your own node
+
+Mutinynet has 30-second blocks, which makes it the quickest network to test on.
+It is a custom signet, so the node needs its challenge and block time, and it
+publishes no DNS seeds, so it needs its one peer by hand:
+
+```sh
+./target/release/rbitcoin-node --datadir ~/rbitcoin-mutinynet --network signet \
+  --signetchallenge 512102f7561d208dd9ae99bf497273e16f389bdbd6c4742ddb8e6b216e64fa2928ad8f51ae \
+  --signetblocktime 30 --connect 45.79.52.207:38333 \
+  --shindex --sptweaks \
+  --electrum-listen 127.0.0.1:50002 --esplora-listen 127.0.0.1:3002
+```
+
+About 7 GB and a few hours. With one peer and no seeds, a dial that fails is not
+retried, so if the tip stops moving, restart it.
 
 [BlindBit]: https://github.com/setavenger/blindbit-oracle
 [rbitcoin]: https://github.com/reardencode/rbitcoin
@@ -279,6 +317,15 @@ Every flow below ran over the physical hardware.
   one 64-byte witness item, and two `v1_p2tr` outputs, no ordinary address
   anywhere. `sp-scan` then found both again, so the change stayed in the
   keyspace it came from.
+
+- **The whole loop with no public server**, Mutinynet, with `--esplora` pointed
+  at that same node as well. KISS signed a payment to this
+  wallet's own code
+  ([7844c4b7…8a77](https://mutinynet.com/tx/7844c4b74439fbc982fb716ffd55d1295ecff254e31fd151d40766f5e5fc8a77),
+  block 3371651), `sp-scan --electrum` found it, and KISS spent it back
+  ([dc87380d…04cc](https://mutinynet.com/tx/dc87380d6921412d7ddd3026e6a9a28f6db9add57983f0f488d7d182cc7804cc),
+  block 3371657). The blocks, the fee estimate, the tweaks and the broadcast all
+  came from one node on the same laptop.
 
 Scanning the same signet range through that node and through the public BlindBit
 oracle finds the same output: same outpoint, same amount, same block. Two
