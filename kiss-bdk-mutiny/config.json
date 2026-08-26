@@ -1,0 +1,6 @@
+{
+  "network": "signet",
+  "chain": "mutinynet",
+  "esplora": "https://mutinynet.com/api",
+  "descriptor": "wpkh([a273bd61/84h/1h/0h]tpubDCvpho787riraoYEoTbb5z7VfiGzdFVxDYXb5uPPAxh2KwyE85xwxuYJuXnCY7TZQiUntFKcfspEidB6ZddQoezUZtDbokb54PrMMDqAFDt/<0;1>/*)"
+}
