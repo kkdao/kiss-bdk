@@ -6,11 +6,13 @@
 
 **Offline Bitcoin signing, powered by BDK**
 
-An experimental Rust coordinator for Bitcoin's test networks. Your keys stay
-offline on KISS, a signing device. BDK runs the watch-only wallet online. They
-talk over QR codes only.
+A command-line Bitcoin wallet that never touches your keys. They stay offline on
+KISS, a signing device. This side watches the chain, builds the transaction, and
+checks what comes back. QR codes are the only thing that crosses between them.
 
 `Pair` → `Sync` → `Build` → `Sign` → `Verify` → `Broadcast`
+
+⚠️ **Experimental, and test networks only.** Mainnet cannot be selected.
 
 > ### 🔁 A silent payment, received and spent
 >
@@ -23,102 +25,120 @@ talk over QR codes only.
 >
 > Received [7844c4b7…](https://mutinynet.com/tx/7844c4b74439fbc982fb716ffd55d1295ecff254e31fd151d40766f5e5fc8a77)
 > · spent [dc87380d…](https://mutinynet.com/tx/dc87380d6921412d7ddd3026e6a9a28f6db9add57983f0f488d7d182cc7804cc)
-> · [how to run it](#from-a-node-of-your-own)
+> · [run it yourself](docs/node.md)
 
-[Roadmap](ROADMAP.md) · [How silent payments work here](docs/silent-payments.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+[Roadmap](ROADMAP.md) · [Silent payments](docs/silent-payments.md) ·
+[Your own node](docs/node.md) · [Other signing devices](docs/other-devices.md) ·
+[Proof](docs/proof.md) · [Security](SECURITY.md) ·
+[Contributing](CONTRIBUTING.md)
 
 ## 🧩 Who does what
 
 Two machines, and neither trusts the other.
 
-**kiss-bdk is the coordinator**: online, watch-only, holds no spending keys. It
-builds transactions and checks what comes back. **The signing device** is
-offline, holds the keys, and is the only thing that can sign. QR codes are the
-only thing that crosses between them.
+- **kiss-bdk**, this program, is online and watch-only. It holds no spending
+  keys, so the worst it can do is show you the wrong thing.
+- **The signing device** is offline, holds the keys, and is the only thing that
+  can sign.
 
-Inside the coordinator, silent payments are not one library's job:
+Under the hood, the work is split up:
 
 | | |
 | --- | --- |
-| **BDK** (`bdk_wallet`) | the wallet: descriptors, addresses, coin selection, fees, change, building and finalizing PSBTs |
-| **`bdk_sp`** | the BIP-352 maths: deriving a silent payment output, and testing a block's tweaks against a scan key |
-| **kiss-bdk** | what neither covers: the BIP-375 and BIP-376 PSBT fields, verifying what the device returns, the QR transport, and the tweak clients |
-| **the signing device** | the keys. It derives each silent payment output script, because only the input private keys can |
-| **a tweak source** | per-block data no block explorer serves. A [BlindBit] oracle, or your own [rbitcoin] node |
-
-BDK is the wallet library, not the server and not the signing device.
+| **BDK** (`bdk_wallet`) | descriptors, addresses, coin selection, fees, change, building and finalizing PSBTs |
+| **`bdk_sp`** | the BIP-352 maths |
+| **kiss-bdk** | the BIP-375 and BIP-376 PSBT fields, verifying what the device returns, the QR transport, the tweak clients |
+| **the signing device** | the keys, and deriving each silent payment output script, because only the input private keys can |
+| **a tweak source** | per-block data no block explorer serves: a [BlindBit] oracle, or your own [rbitcoin] node |
 
 ## 📦 Install
 
-Needs Rust, a C compiler and a webcam. macOS and Linux.
+You need Rust, a C compiler and a webcam. macOS and Linux.
+
+**1. Compiler.**
 
 ```sh
-# macOS
-xcode-select --install
-# Linux (Debian or Ubuntu)
-sudo apt install -y build-essential pkg-config libv4l-dev libclang-dev clang
+xcode-select --install                                                       # macOS
+sudo apt install -y build-essential pkg-config libv4l-dev libclang-dev clang  # Debian, Ubuntu
 ```
+
+**2. Rust.**
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-git clone https://github.com/kkdao/kiss-bdk && cd kiss-bdk
-cargo build --release
 ```
 
-Commands below start `./target/release/kiss-bdk`, or run `cargo install --path .`
-to type just `kiss-bdk`. No git? Download the
-[zip](https://github.com/kkdao/kiss-bdk/archive/refs/heads/main.zip) instead.
+**3. This.**
 
-macOS asks for camera permission on the first `--scan-qr`. No webcam is fine:
-everything also works from files, see
-[Testing another signing device](#-testing-another-signing-device).
+```sh
+git clone https://github.com/kkdao/kiss-bdk && cd kiss-bdk
+cargo install --path .
+```
 
-## 🌐 Networks
-
-Chosen at `init` and fixed for that wallet directory.
-
-| `--network` | Default Esplora | Faucet |
-| --- | --- | --- |
-| `testnet4` (default) | `mempool.space/testnet4` | browser only |
-| `signet` | `mempool.space/signet` | browser only |
-| `mutinynet` | `mutinynet.com` | `kiss-bdk faucet --token …` |
-| `regtest` | `127.0.0.1:3000` | mine to the address |
-
-All four are coin type `1h`, so one descriptor derives the same addresses on all
-of them, which also means a `tb1…` address is valid on three of them and
-nothing tells them apart. Keep one `--wallet-dir` per network. Mainnet is not
-selectable. Mutinynet's 30-second blocks make it the one to demo on.
+That puts `kiss-bdk` on your `PATH`. macOS asks for camera permission the first
+time you scan. No webcam is fine, everything also works from files: see
+[other signing devices](docs/other-devices.md).
 
 ## 🚀 Quick start
 
-On KISS: enable Testnet, unlock, then **PAIR COORDINATOR → DESKTOP**.
+Mutinynet has 30-second blocks, so it is the least boring network to learn on.
+
+**1. Pair.** On KISS: enable Testnet, unlock, then **PAIR COORDINATOR →
+DESKTOP**. Then hold it up to the camera:
 
 ```sh
 kiss-bdk init --network mutinynet --scan-qr
-kiss-bdk sync
-kiss-bdk address
 ```
 
-Fund that address, `sync` again, then send:
+**2. Get an address**, and put coins on it.
+
+```sh
+kiss-bdk sync
+kiss-bdk address
+kiss-bdk faucet --sats 100000 --token …   # Mutinynet only, see below
+```
+
+**3. Check it arrived.** `sync` reads the chain, `balance` reads what sync
+stored, so always sync first.
+
+```sh
+kiss-bdk sync
+kiss-bdk balance
+```
+
+**4. Build a payment.** This prints a QR on your screen.
 
 ```sh
 kiss-bdk create --to tb1q… --sats 10000 --qr
 ```
 
-On KISS choose **SIGN → SCAN QR**, review, sign. While it shows the animated
-signed QR:
+**5. Sign it.** On KISS choose **SIGN → SCAN QR**, check the amount and address
+on its screen, and sign. It answers with an animated QR.
+
+**6. Read the answer back**, while KISS is still showing it:
 
 ```sh
 kiss-bdk scan
-kiss-bdk broadcast signed.psbt --original unsigned.psbt --dry-run
+```
+
+**7. Check and send.**
+
+```sh
 kiss-bdk broadcast signed.psbt --original unsigned.psbt
 ```
 
-`broadcast` re-checks that KISS returned the transaction it was given, verifies
-every signature, and finalizes before anything reaches the network.
+That last step re-checks that KISS returned the transaction it was given,
+verifies every signature, and finalizes, all before anything reaches the
+network. Add `--dry-run` to do everything except send.
 
-The fee rate comes from the backend's next-block estimate. `--fee-rate` overrides
-it.
+The fee rate comes from the backend's next-block estimate; `--fee-rate`
+overrides it.
+
+**Faucets.** Mutinynet is the only network with a faucet you can call from the
+command line, and it needs a token: sign in at
+<https://faucet.mutinynet.com/>, then pass `--token` or export
+`MUTINYNET_FAUCET_TOKEN`. On the others the command prints the address and the
+faucet links for you to open in a browser.
 
 ## 🤫 Silent payments
 
@@ -126,228 +146,87 @@ One address, `tsp1…`, that you reuse forever. Each payment to it still lands o
 a different address on chain, so nothing links them. The reasoning is in
 [docs/silent-payments.md](docs/silent-payments.md); these are the commands.
 
-### Sending to one
-
 ```sh
-kiss-bdk create --to tsp1… --sats 10000 --qr
+kiss-bdk create --to tsp1… --sats 10000 --qr             # pay one
+
+kiss-bdk sp-pair --scan-qr                               # import the scan key
+kiss-bdk sp-address                                      # the tsp1… code to hand out
+kiss-bdk sp-scan                                         # search the chain
+kiss-bdk sp-balance                                      # what was found
+
+kiss-bdk create --to tb1q… --sats 10000 --from-sp --qr   # spend what was found
 ```
-
-The signing device derives the output script, because only the input private
-keys can. Before broadcast this checks the same transaction came back, that its
-DLEQ proof is honest, and that re-deriving reproduces the script it wrote.
-
-### Receiving
-
-```sh
-kiss-bdk sp-pair --scan-qr     # import the scan key
-kiss-bdk sp-address            # the tsp1… code to hand out
-kiss-bdk sp-scan               # search the chain
-kiss-bdk sp-balance            # what was found
-```
-
-Finding a payment means testing every block against your scan key, using data
-no block explorer serves. By default it comes from a [BlindBit] oracle. The
-matching runs locally, so that server sees which blocks you asked for, never
-which coins are yours. Run your own node and it sees nothing.
 
 `sp-pair` imports the scan key only: this wallet can see payments and can never
 move them. `sp-scan --tx <txid>` works before a payment is mined.
 
-### Spending what was received
+Two things worth knowing:
 
-```sh
-kiss-bdk create --to tb1q… --sats 10000 --from-sp --qr
-```
+- **Scanning needs a tweak source.** By default a public [BlindBit] oracle. The
+  matching runs on your machine, so that server sees which blocks you asked for,
+  never which coins are yours. [Your own node](docs/node.md) sees nothing, and
+  is seven times faster.
+- **Silent payment coins are spent on their own.** A transaction mixing them
+  with ordinary coins is refused, because only an all-taproot spend proves its
+  own fee. If the silent payment balance cannot cover a payment, the ordinary
+  balance cannot make up the difference. Change stays in the silent payment
+  keyspace.
 
-Change stays in the silent payment keyspace rather than landing on an ordinary
-address.
+Sending is checked as hard as anything else: before broadcast this confirms the
+same transaction came back, that its DLEQ proof is honest, and that re-deriving
+reproduces the script it wrote.
 
-**Silent payment coins are spent on their own.** A transaction mixing them with
-ordinary coins is refused, because only an all-taproot spend proves its own fee.
-If the silent payment balance cannot cover a payment, the ordinary balance
-cannot make up the difference.
+## 🌐 Networks
 
-### From a node of your own
+Picked at `init` and fixed for that wallet directory.
 
-```sh
-git clone https://github.com/reardencode/rbitcoin && cd rbitcoin
-cargo build --release -p rbitcoin-node
-./target/release/rbitcoin-node --datadir ~/rbitcoin-signet --network signet \
-  --shindex --sptweaks \
-  --electrum-listen 127.0.0.1:50001 --esplora-listen 127.0.0.1:3000
-```
+| `--network` | Blocks | Default Esplora |
+| --- | --- | --- |
+| `testnet4` (default) | ~10 min | `mempool.space/testnet4` |
+| `signet` | ~10 min | `mempool.space/signet` |
+| `mutinynet` | 30 s | `mutinynet.com` |
+| `regtest` | you mine them | `127.0.0.1:3000` |
 
-```sh
-kiss-bdk sp-scan --electrum 127.0.0.1:50001
-```
+All four are coin type `1h`, so one descriptor derives the same addresses on all
+of them, which also means a `tb1…` address is valid on three of them and nothing
+tells them apart. **Keep one `--wallet-dir` per network.**
 
-[rbitcoin] serves the same data over the Electrum protocol, so you ask nobody.
-Each tweak arrives attached to its transaction, so **no blocks are fetched**:
-46 s against BlindBit's 5 m 23 s over the same signet range.
+## 🩺 If something goes wrong
 
-**Storage.** It does not prune, so this is a full archive: **signet is 19 GB**,
-roughly 1½ hours to sync plus 18 minutes to index. It serves nothing until that
-finishes. `--network regtest` comes up in seconds.
-
-### Everything from your own node
-
-Point `--esplora` at the node too and no public server is left in the loop:
-
-```sh
-kiss-bdk init --network mutinynet --esplora http://127.0.0.1:3002 --scan-qr
-```
-
-Now `sync`, the fee estimate and `broadcast` all come from the same node that
-serves the tweaks. Ordinary sync needed a public server until
-[rbitcoin#209](https://github.com/reardencode/rbitcoin/issues/209) was fixed, so
-build rbitcoin from `master` rather than a release.
-
-### Mutinynet on your own node
-
-Mutinynet has 30-second blocks, which makes it the quickest network to test on.
-It is a custom signet, so the node needs its challenge and block time, and it
-publishes no DNS seeds, so it needs its one peer by hand:
-
-```sh
-./target/release/rbitcoin-node --datadir ~/rbitcoin-mutinynet --network signet \
-  --signetchallenge 512102f7561d208dd9ae99bf497273e16f389bdbd6c4742ddb8e6b216e64fa2928ad8f51ae \
-  --signetblocktime 30 --connect 45.79.52.207:38333 \
-  --shindex --sptweaks \
-  --electrum-listen 127.0.0.1:50002 --esplora-listen 127.0.0.1:3002
-```
-
-About 7 GB and a few hours. With one peer and no seeds, a dial that fails is not
-retried, so if the tip stops moving, restart it.
-
-[BlindBit]: https://github.com/setavenger/blindbit-oracle
-[rbitcoin]: https://github.com/reardencode/rbitcoin
-
-## 💧 Topping up
-
-```sh
-kiss-bdk faucet --sats 100000
-```
-
-Mutinynet is the only network with a callable faucet API, and it needs a bearer
-token. Sign in at <https://faucet.mutinynet.com/>, then pass `--token` or export
-`MUTINYNET_FAUCET_TOKEN`. The others are captcha-protected, so the command
-prints the address and the links instead of pretending.
-
-## 🔌 Testing another signing device
-
-Nothing here is tied to KISS except the QR commands. `create` writes a PSBT file
-and `broadcast` reads one back, so any device that can load a file will do,
-whether it ships BIP-375 and BIP-376 today or you are adding them.
-
-No node needed: the check runs offline, against files.
-
-```sh
-kiss-bdk init --network signet --descriptor "<your device's descriptor>"
-kiss-bdk create --to tsp1… --sats 10000 --out unsigned.psbt
-# sign unsigned.psbt on your device, save it as signed.psbt
-kiss-bdk broadcast signed.psbt --original unsigned.psbt --dry-run
-```
-
-That last line is the point. It trusts nothing the device sends back: same
-transaction, DLEQ proof, re-derived output script, every signature checked
-against a key worked out here. And it names which part failed. Fix, repeat.
-
-To receive as well, pair from the two keys directly, since BIP-352 does not say
-how a device should hand its scan key over:
-
-```sh
-kiss-bdk sp-pair --keys SCAN_PRIVATE_HEX:SPEND_PUBLIC_HEX
-```
-
-64 hex digits then 66. From there `sp-address`, `sp-scan` and `--from-sp` all
-work as they do for KISS.
-
-The exact bytes `create` emits are asserted in
-[tests/sp_spend_psbt.rs](tests/sp_spend_psbt.rs), so it is a specification you
-can diff against rather than a description.
-[tests/sp_spend_fixtures.rs](tests/sp_spend_fixtures.rs) writes PSBTs for a
-device's own harness, including one whose tweak does not reproduce the output
-key, which a correct device must refuse.
-
-For a loop with no faucet and no ten-minute blocks, `--network regtest` against
-a local node has neither, and
-[tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) is a worked example.
-
-## 🔨 Build
-
-```sh
-cargo test --locked
-cargo build --release --locked
-```
-
-Needs Rust, a C compiler, and a webcam. Tested on macOS.
+- **`broadcast` refuses.** Good. It names which check failed rather than sending
+  something it cannot vouch for. Nothing reached the network.
+- **Camera does not open on macOS.** Grant Terminal camera access in System
+  Settings, then run the command again.
+- **No webcam, or KISS is elsewhere.** Use `--out unsigned.psbt` and pass files
+  around instead: [other signing devices](docs/other-devices.md).
+- **Balance looks wrong.** Run `sync` first, and check you are pointing at the
+  wallet directory for that network.
 
 ## 📷 QR
 
-- Computer → device: one static Base64 PSBT QR when it fits, and an animated
-  BC-UR `crypto-psbt` GIF when it does not. `--qr` also picks the largest coins
-  first, so a transaction uses the fewest inputs it can.
-- Device → computer: animated BC-UR `crypto-psbt`.
-- Decoding uses the vendored `k_quirc`, the same decoder the device runs.
+Computer to device: one static Base64 PSBT QR when it fits, an animated BC-UR
+`crypto-psbt` GIF when it does not. `--qr` also picks the largest coins first, so
+a transaction uses the fewest inputs it can. Device to computer: animated BC-UR.
+Decoding uses the vendored [k_quirc](vendor/k_quirc), the same decoder the device
+runs.
 
 ## ✅ Proof
 
-Don't trust, verify. Every flow below ran on real hardware. The transactions
-are on chain.
+Don't trust, verify. Every flow ran on real hardware and the transactions are on
+chain: **[docs/proof.md](docs/proof.md)**.
 
-- Ordinary send, Testnet4:
-  [8b3473f8…3f8659](https://mempool.space/testnet4/tx/8b3473f888ff1f896f9112e2886bd63d3d2595456f57d3009038f5de173f8659)
-- Silent payment **sent**, Signet:
-  [3a6801e9…0cd12a](https://mempool.space/signet/tx/3a6801e9b5a7398406621299aefc8a2c915d20de612f21a26011972aa90cd12a).
-  Its recipient uses throwaway keys, so it checks from the receiving side too.
-- Silent payment **spent**, Mutinynet:
-  [3e0fdd39…54ab80](https://mutinynet.com/tx/3e0fdd3965f541d25771c732d42b459759b6fd643d07bc1843a756f9de54ab80).
-  One `v1_p2tr` key-path input, one 64-byte signature.
-- **The whole loop**, Signet, on a node of this wallet's own: KISS signed a
-  payment to this wallet's own code
-  ([339b903e…df21d3fb](https://mempool.space/signet/tx/339b903ee339a864a6e54dfc87c459f86fc213ec319568edfbdfcb3adf21d3fb),
-  block 319011), `sp-scan --electrum` found it through that node's BIP-352
-  index, and KISS spent it back
-  ([e6543ce2…2dd18560](https://mempool.space/signet/tx/e6543ce27be85b688e57dd57d75de92450ecbb138c5ea443e0d0de6a2dd18560),
-  block 319014) as a `v1_p2tr` key-path input with one 64-byte witness item.
-
-- **Silent payment change**, Signet, with both halves in one transaction:
-  [56458880…e7cad3f1](https://mempool.space/signet/tx/564588801141c52bd412a69ac6b08af843724f66cbe20f75cc443436e7cad3f1),
-  block 319035. BIP-376 on the input, BIP-375 on **both** outputs, paying this
-  wallet's own code so the two carry the same recipient and the device assigns
-  them different derivation orders. On chain: a `v1_p2tr` key-path input with
-  one 64-byte witness item, and two `v1_p2tr` outputs, no ordinary address
-  anywhere. `sp-scan` then found both again, so the change stayed in the
-  keyspace it came from.
-
-- **The whole loop with no public server**, Mutinynet, with `--esplora` pointed
-  at that same node as well. KISS signed a payment to this
-  wallet's own code
-  ([7844c4b7…8a77](https://mutinynet.com/tx/7844c4b74439fbc982fb716ffd55d1295ecff254e31fd151d40766f5e5fc8a77),
-  block 3371651), `sp-scan --electrum` found it, and KISS spent it back
-  ([dc87380d…04cc](https://mutinynet.com/tx/dc87380d6921412d7ddd3026e6a9a28f6db9add57983f0f488d7d182cc7804cc),
-  block 3371657). The blocks, the fee estimate, the tweaks and the broadcast all
-  came from one node on the same laptop.
-
-Scanning the same signet range through that node and through the public BlindBit
-oracle finds the same output: same outpoint, same amount, same block. Two
-independent sources agreeing is the check that matters; 46 s against 5 m 23 s is
-the difference in cost.
-
-[tests/rbitcoin_regtest.rs](tests/rbitcoin_regtest.rs) runs the whole thing
-unattended against a local node: mines a coin, pays a real silent payment to
-itself, and finds it again knowing only the recipient's keys.
+The one that matters is the whole loop with no public server in it, node and
+wallet on the same laptop. Scanning the same signet range through that node and
+through the public oracle finds the same output, at 46 s against 5 m 23 s.
 
 ## 🙏 Built on
 
 - [BDK](https://github.com/bitcoindevkit/bdk_wallet) and
   [bdk_sp](https://github.com/bitcoindevkit/bdk-sp), which do the wallet and the
   BIP-352 maths
-- [rbitcoin](https://github.com/reardencode/rbitcoin) by
-  [@reardencode](https://github.com/reardencode), the node serving the tweak
-  stream. Signet scanning here runs against it today
-- [BlindBit](https://github.com/setavenger/blindbit-oracle), the oracle used
-  when you have no node of your own
+- [rbitcoin] by [@reardencode](https://github.com/reardencode), the node serving
+  the tweak stream
+- [BlindBit], the oracle used when you have no node of your own
 - [k_quirc](vendor/k_quirc), the QR decoder shared with the signing device
 
 ## 💬 Community
@@ -360,3 +239,6 @@ Silent payments, offline signing devices and DIY hardware get discussed here:
 
 Bringing BIP-375 or BIP-376 up on another device is exactly the sort of thing
 worth asking about there. Bugs and results are welcome as issues here too.
+
+[BlindBit]: https://github.com/setavenger/blindbit-oracle
+[rbitcoin]: https://github.com/reardencode/rbitcoin
