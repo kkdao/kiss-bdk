@@ -13,7 +13,7 @@ readme = "README.md"
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
-bdk_esplora = { version = "0.22.2", default-features = false, features = ["std", "blocking-https-rustls"] }
+bdk_esplora = { version = "0.22.2", default-features = false, features = ["std", "blocking-https-native"] }
 bdk_wallet = { version = "3.1.0", features = ["rusqlite"] }
 # BIP-352 receive-side scanning; shares bdk_wallet's bitcoin 0.32.
 bdk_sp = { version = "0.2.0", features = ["serde"] }
@@ -21,7 +21,7 @@ clap = { version = "4.5", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png", "gif"] }
 minicbor = "2.2"
 # Already in the tree via bdk_esplora's blocking backend; reused for faucet calls.
-minreq = { version = "2.14", features = ["https-rustls"] }
+minreq = { version = "2.14", features = ["https-native"] }
 # BIP-375 silent payment PSBT fields; shares bdk_wallet's bitcoin 0.32.
 psbt-v2 = { version = "=0.3.0", features = ["silent-payments", "base64", "std"] }
 nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }

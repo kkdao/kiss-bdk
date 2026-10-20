@@ -17,6 +17,7 @@ on:
   workflow_dispatch:
 
 env:
+  NODE_OPTIONS: --use-openssl-ca
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -28,6 +29,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare TLS trust for downloads
+        run: python3 .github/scripts/with_trusted_ca.py --github-env
 
       # `cc` builds the vendored k_quirc decoder. nokhwa's native backend links
       # v4l on Linux even with no camera attached, and its bindgen step needs
@@ -36,7 +39,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libv4l-dev libclang-dev clang
+          sudo apt-get install -y build-essential pkg-config libv4l-dev libclang-dev clang libssl-dev ca-certificates
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -55,6 +58,9 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Reject compromised CA chains
+        run: cargo test --locked --test https_trust -- --ignored
+
       - name: Build release
         run: cargo build --release --locked
 
@@ -64,10 +70,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare TLS trust for downloads
+        run: python3 .github/scripts/with_trusted_ca.py --github-env
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libv4l-dev libclang-dev clang
+          sudo apt-get install -y build-essential pkg-config libv4l-dev libclang-dev clang libssl-dev ca-certificates
       - name: Read the declared MSRV
         id: msrv
         run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
@@ -83,6 +91,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare TLS trust for downloads
+        run: python3 .github/scripts/with_trusted_ca.py --github-env
       # Run the tool rather than the action wrapping it. The wrapper reports by
       # creating a check run, which needs a write-scoped token it is not given
       # on a fork's pull request, so it fails on the report rather than on the

@@ -54,6 +54,11 @@ Under the hood, the work is split up:
 ## 📦 Install
 
 You need Rust, a C compiler and a webcam. macOS and Linux.
+HTTPS uses the operating system's certificate trust store; keep it updated and
+rebuild older binaries to pick up the native TLS backend. On Linux, also install
+`pkg-config`, `libssl-dev` and `ca-certificates`. CI filters the compromised
+eMudhra root paths before downloads and checks their rejection through both
+HTTP clients with `cargo test --locked --test https_trust -- --ignored`.
 
 **1. Compiler.**
 
