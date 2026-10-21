@@ -21,6 +21,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  sp-interop:
+    uses: ./.github/workflows/sp-interop.yml
+
   test:
     strategy:
       fail-fast: false

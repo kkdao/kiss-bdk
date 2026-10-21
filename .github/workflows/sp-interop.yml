@@ -1,0 +1,45 @@
+name: Silent Payment interoperability
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      signer_ref:
+        description: Signer commit or ref to test (defaults to the pinned baseline)
+        type: string
+        default: '67d0f0f9df27675efea33ae0a1e020475afe5144'
+
+permissions:
+  contents: read
+
+env:
+  NODE_OPTIONS: --use-openssl-ca
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sp-interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: coordinator
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: DIYbitcoin/kiss-signer
+          ref: ${{ inputs.signer_ref || '67d0f0f9df27675efea33ae0a1e020475afe5144' }}
+          path: signer
+          persist-credentials: false
+      - name: Prepare TLS trust for downloads
+        run: python3 signer/.github/scripts/with_trusted_ca.py --github-env
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libv4l-dev libclang-dev clang libssl-dev ca-certificates
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: coordinator -> target
+      - name: Send, spend, and recover Silent Payment change
+        run: bash coordinator/tools/run_sp_interop.sh signer
