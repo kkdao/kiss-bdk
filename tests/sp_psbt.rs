@@ -139,3 +139,47 @@ fn rejects_an_out_of_range_silent_payment_output() {
         .is_err()
     );
 }
+
+#[path = "support/sp_signer.rs"]
+mod sp_signer;
+
+/// Offline BDK -> actual C signer -> independent Rust verification.
+#[test]
+#[ignore = "requires KISS_INTEROP_SIGNER built from kiss-signer; no network or device"]
+fn c_signer_bip375_round_trip_and_tampering() {
+    use kiss_bdk::{spsend::to_v0, spverify, verify_psbt_signatures};
+    use std::collections::BTreeMap;
+    let v0 = placeholder_psbt();
+    let recipient = sp::decode(SP_ADDRESS).unwrap();
+    let index = placeholder_index(&v0, &recipient).unwrap();
+    let request = build_v2(&v0, &[SpOutput { index, recipient }]).unwrap();
+    let original = PsbtV2::deserialize(&request).unwrap();
+    let signed_bytes = sp_signer::sign(&request, 0).unwrap();
+    let signed = PsbtV2::deserialize(&signed_bytes).unwrap();
+    let checked = spverify::verify(&original, &signed).unwrap();
+    assert_eq!(checked.len(), 1);
+    assert_eq!(checked[0].index, index);
+    let signed_v0 = to_v0(&signed).unwrap();
+    verify_psbt_signatures(&signed_v0, &BTreeMap::new()).unwrap();
+
+    let mut bad_proof = signed.clone();
+    let key = *bad_proof.global.sp_dleq_proofs.keys().next().unwrap();
+    let mut proof = *bad_proof.global.sp_dleq_proofs[&key].as_bytes();
+    proof[0] ^= 1;
+    bad_proof.global.sp_dleq_proofs.insert(key, proof.into());
+    assert!(spverify::verify(&original, &bad_proof).is_err());
+
+    let mut redirected = signed.clone();
+    let mut script = redirected.outputs[index].script_pubkey.to_bytes();
+    *script.last_mut().unwrap() ^= 1;
+    redirected.outputs[index].script_pubkey = script.into();
+    assert!(spverify::verify(&original, &redirected).is_err());
+
+    // Change the signed message while retaining the actual C signature.
+    let mut changed = signed_v0.clone();
+    changed.unsigned_tx.output[index].value = Amount::from_sat(1);
+    assert!(verify_psbt_signatures(&changed, &BTreeMap::new()).is_err());
+    let mut missing = signed_v0;
+    missing.inputs[0].partial_sigs.clear();
+    assert!(verify_psbt_signatures(&missing, &BTreeMap::new()).is_err());
+}

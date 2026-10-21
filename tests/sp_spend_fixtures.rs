@@ -18,7 +18,7 @@
 //!
 //! ```sh
 //! KISS_FIXTURE_DIR=/tmp/sp-fixtures \
-//!   cargo test --test sp_spend_fixtures -- --ignored --nocapture
+//!   cargo test --test sp_spend_fixtures write_spend_fixtures -- --ignored --exact --nocapture
 //! ```
 
 use std::path::PathBuf;
@@ -88,15 +88,23 @@ fn foreign_coin() -> SpCoin {
 }
 
 fn build(coins: &[SpCoin], sats: u64) -> Vec<u8> {
-    let origin = spspend::spend_origin(Fingerprint::from_str("73c5da0a").unwrap());
-    let (external, internal) = kiss_bdk::split_kiss_descriptor(KISS_DESC).unwrap();
-    let (mut wallet, _, funding) = new_wallet_and_funding_update(&external, Some(&internal));
-    wallet.apply_update(funding).unwrap();
-
     let destination = Address::from_str(DESTINATION)
         .unwrap()
         .assume_checked()
         .script_pubkey();
+    build_v2(&build_to(coins, destination, sats, None), &[]).unwrap()
+}
+
+fn build_to(
+    coins: &[SpCoin],
+    destination: ScriptBuf,
+    sats: u64,
+    change: Option<ScriptBuf>,
+) -> bdk_wallet::bitcoin::Psbt {
+    let origin = spspend::spend_origin(Fingerprint::from_str("73c5da0a").unwrap());
+    let (external, internal) = kiss_bdk::split_kiss_descriptor(KISS_DESC).unwrap();
+    let (mut wallet, _, funding) = new_wallet_and_funding_update(&external, Some(&internal));
+    wallet.apply_update(funding).unwrap();
 
     let mut builder = wallet.build_tx();
     for c in coins {
@@ -110,11 +118,13 @@ fn build(coins: &[SpCoin], sats: u64) -> Vec<u8> {
             .unwrap();
     }
     builder.manually_selected_only();
+    if let Some(change) = change {
+        builder.drain_to(change);
+    }
     builder
         .add_recipient(destination, Amount::from_sat(sats))
         .fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
-    let v0 = builder.finish().unwrap();
-    build_v2(&v0, &[]).unwrap()
+    builder.finish().unwrap()
 }
 
 /// Replace the 32-byte tweak value on the first input, leaving everything else
@@ -236,5 +246,174 @@ fn verify_device_signed_fixtures() {
         }
         let tx = psbt.extract_tx().unwrap_or_else(|e| panic!("{name}: {e}"));
         println!("{name}: verified and extracted {}", tx.compute_txid());
+    }
+}
+
+#[path = "support/sp_signer.rs"]
+mod sp_signer;
+
+#[test]
+#[ignore = "requires KISS_INTEROP_SIGNER built from kiss-signer; no network or device"]
+fn c_signer_bip376_round_trip_and_foreign_tweak_refusal() {
+    use kiss_bdk::{spsend::to_v0, spverify, verify_psbt_signatures};
+    use psbt_v2::v2::Psbt as PsbtV2;
+    let even = coin(0, EVEN_TWEAK, EVEN_OUTKEY, 100_000);
+    let odd = coin(1, ODD_TWEAK, ODD_OUTKEY, 100_000);
+    for coins in [vec![even.clone()], vec![odd.clone()], vec![even, odd]] {
+        let request = build(&coins, 50_000);
+        let original = PsbtV2::deserialize(&request).unwrap();
+        let bytes = sp_signer::sign(&request, 0).unwrap();
+        let signed = PsbtV2::deserialize(&bytes).unwrap();
+        assert!(spverify::verify(&original, &signed).unwrap().is_empty());
+        let mut psbt = to_v0(&signed).unwrap();
+        let inputs = spspend::sp_inputs(&psbt, &coins).unwrap();
+        assert_eq!(inputs.len(), coins.len());
+        verify_psbt_signatures(&psbt, &inputs).unwrap();
+        let mut changed = psbt.clone();
+        changed.unsigned_tx.output[0].value = Amount::from_sat(1);
+        assert!(verify_psbt_signatures(&changed, &inputs).is_err());
+        spspend::finalize(&mut psbt, &inputs).unwrap();
+        let tx = psbt.extract_tx().unwrap();
+        assert!(tx.input.iter().all(|input| input.witness.len() == 1));
+    }
+    let foreign = substitute_tweak(build(&[foreign_coin()], 50_000), [0x77; 32]);
+    sp_signer::sign(&foreign, 3);
+}
+
+/// BIP-376 inputs and BIP-375 payment/change outputs in the same real signing
+/// session. Scan the result as well: a valid signature alone cannot prove the
+/// change is recoverable by our wallet.
+#[test]
+#[ignore = "requires KISS_INTEROP_SIGNER built from kiss-signer; no network or device"]
+fn c_signer_sp_payment_and_change_round_trip() {
+    use bdk_wallet::bitcoin::secp256k1::Secp256k1;
+    use kiss_bdk::sp::SilentPaymentAddress;
+    use kiss_bdk::spreceive::ScanKeys;
+    use kiss_bdk::spsend::{placeholder_script, resolve_sp_outputs, to_v0};
+    use kiss_bdk::{spscan, spverify, verify_psbt_signatures};
+    use psbt_v2::v2::Psbt as PsbtV2;
+
+    // SPV_LABEL_SCAN_PRIV from the signer's public development-seed vectors.
+    let keys = ScanKeys {
+        scan: SecretKey::from_slice(&[
+            0x38, 0x65, 0x86, 0x93, 0xc0, 0x17, 0xc4, 0x6f, 0xd6, 0xb8, 0xbb, 0x94, 0xb8, 0x76,
+            0x6c, 0x12, 0x3c, 0xd5, 0xba, 0xf6, 0x02, 0x63, 0x38, 0x30, 0x5b, 0x6f, 0x59, 0xf8,
+            0x2b, 0x36, 0xf9, 0xc0,
+        ])
+        .unwrap(),
+        spend: spend(),
+    };
+    let secp = Secp256k1::new();
+    let ours = SilentPaymentAddress {
+        scan: keys.scan.public_key(&secp),
+        spend: keys.spend,
+        mainnet: false,
+    };
+    let payee_keys = ScanKeys {
+        scan: SecretKey::from_slice(&[0x33; 32]).unwrap(),
+        spend: SecretKey::from_slice(&[0x44; 32])
+            .unwrap()
+            .public_key(&secp),
+    };
+    let other = SilentPaymentAddress {
+        scan: payee_keys.scan.public_key(&secp),
+        spend: payee_keys.spend,
+        mainnet: false,
+    };
+    let even = coin(0, EVEN_TWEAK, EVEN_OUTKEY, 100_000);
+    let odd = coin(1, ODD_TWEAK, ODD_OUTKEY, 100_000);
+    for coins in [vec![even.clone()], vec![odd.clone()], vec![even, odd]] {
+        for payee in [other, ours] {
+            let v0 = build_to(
+                &coins,
+                placeholder_script(&payee),
+                50_000,
+                Some(placeholder_script(&ours)),
+            );
+            let outputs = resolve_sp_outputs(&v0, &[payee, ours]).unwrap();
+            assert_eq!(v0.outputs.len(), 2, "payment and SP change must both exist");
+            let payment_index = outputs[0].index;
+            let change_index = outputs[1].index;
+            // Repeated recipients are interchangeable, so identify their role
+            // by amount after BDK's output ordering.
+            let (payment_index, change_index) = if payee == ours
+                && v0.unsigned_tx.output[payment_index].value != Amount::from_sat(50_000)
+            {
+                (change_index, payment_index)
+            } else {
+                (payment_index, change_index)
+            };
+            assert_ne!(payment_index, change_index);
+            assert_eq!(
+                v0.unsigned_tx.output[payment_index].value,
+                Amount::from_sat(50_000)
+            );
+            let request = build_v2(&v0, &outputs).unwrap();
+            let original = PsbtV2::deserialize(&request).unwrap();
+            assert!(
+                original
+                    .outputs
+                    .iter()
+                    .all(|o| o.script_pubkey.is_empty() && o.sp_v0_info.is_some())
+            );
+            let bytes = sp_signer::sign(&request, 0).unwrap();
+            let signed = PsbtV2::deserialize(&bytes).unwrap();
+            let checked = spverify::verify(&original, &signed).unwrap();
+            assert_eq!(checked.len(), 2);
+            assert!(checked.iter().any(|o| o.index == payment_index));
+            assert!(checked.iter().any(|o| o.index == change_index));
+            assert_ne!(
+                signed.outputs[0].script_pubkey,
+                signed.outputs[1].script_pubkey
+            );
+
+            // Both output scripts are checked, including change, not just the
+            // recipient displayed by the coordinator.
+            for index in [payment_index, change_index] {
+                let mut redirected = signed.clone();
+                let mut script = redirected.outputs[index].script_pubkey.to_bytes();
+                *script.last_mut().unwrap() ^= 1;
+                redirected.outputs[index].script_pubkey = script.into();
+                assert!(spverify::verify(&original, &redirected).is_err());
+            }
+            let mut changed = signed.clone();
+            changed.outputs[change_index].amount = Amount::from_sat(1);
+            assert!(spverify::verify(&original, &changed).is_err());
+
+            let mut psbt = to_v0(&signed).unwrap();
+            let inputs = spspend::sp_inputs(&psbt, &coins).unwrap();
+            assert_eq!(inputs.len(), coins.len());
+            verify_psbt_signatures(&psbt, &inputs).unwrap();
+            let prevouts: Vec<_> = original
+                .inputs
+                .iter()
+                .map(|input| input.witness_utxo.clone().unwrap())
+                .collect();
+            spspend::finalize(&mut psbt, &inputs).unwrap();
+            let tx = psbt.extract_tx().unwrap();
+            assert!(
+                tx.input
+                    .iter()
+                    .all(|i| i.witness.len() == 1 && i.witness.iter().next().unwrap().len() == 64)
+            );
+            assert!(tx.output.iter().all(|o| o.script_pubkey.is_p2tr()));
+            let found =
+                spscan::scan_transaction(&spscan::scanner(&keys), &tx, &prevouts, 200).unwrap();
+            assert_eq!(found.len(), if payee == ours { 2 } else { 1 });
+            assert!(
+                found
+                    .iter()
+                    .any(|f| f.out.outpoint.vout == change_index as u32
+                        && f.out.amount == tx.output[change_index].value)
+            );
+            if payee != ours {
+                let paid =
+                    spscan::scan_transaction(&spscan::scanner(&payee_keys), &tx, &prevouts, 200)
+                        .unwrap();
+                assert_eq!(paid.len(), 1);
+                assert_eq!(paid[0].out.outpoint.vout, payment_index as u32);
+                assert_eq!(paid[0].out.amount, Amount::from_sat(50_000));
+            }
+        }
     }
 }
