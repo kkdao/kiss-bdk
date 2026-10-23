@@ -42,6 +42,26 @@ refuses the block. Silent payments already work fully against it.
 [bdk-sp#70](https://github.com/bitcoindevkit/bdk-sp/pull/70) and
 [#71](https://github.com/bitcoindevkit/bdk-sp/pull/71) are open.
 
+## Interoperability and scanning compatibility
+
+- **Implemented locally:** offline BIP375 and BIP376 round trips against
+  kiss-signer's actual C code, including SP payment with SP change, both
+  spend-key parities, multiple inputs, foreign tweak refusal, Rust verification
+  and recovery by scanning. CI workflows are prepared in both repositories.
+  See [the runner and rollout instructions](docs/sp-interop.md).
+- **Next:** pin [bip375-interop](https://github.com/macgyver13/bip375-interop)
+  and its [SPDK](https://github.com/macgyver13/spdk) validator to reviewed
+  revisions, export coordinator requests as single-signer scenarios, and verify
+  final PSBTs with both SPDK and Caravan. Record validator results and artifact
+  hashes; do not treat a process exit code or skipped validator as a pass.
+  Keep BDK as the wallet implementation.
+- **Planned:** a separate adapter and conformance fixtures for the draft
+  [BIP0352 index-server API](https://github.com/silent-payments/BIP0352-index-server-specification).
+  Compare network metadata, heights, tweak response shapes, pagination,
+  dust filtering and reorg handling against a pinned specification revision
+  before enabling it. Existing BlindBit and Electrum clients are not evidence
+  of conformance. Keep scan secrets local and test with mock servers first.
+
 ## Not planned
 
 - **Mainnet.** This holds a scan private key and is not audited. See
