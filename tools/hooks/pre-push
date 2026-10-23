@@ -1,0 +1,5 @@
+#!/bin/sh
+# Check every outgoing ref and commit before the remote receives it.
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+exec python3 tools/hooks/publication_guard.py push "${1:?missing remote}"

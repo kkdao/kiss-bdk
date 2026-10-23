@@ -28,6 +28,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: publication guard regressions
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/hooks/test_publication_guard.py
+
+      - name: public branch and pull request metadata
+        run: python3 tools/hooks/publication_guard.py event "$GITHUB_EVENT_PATH"
+
       - name: commit messages name no agent
         run: |
           set -u
@@ -49,7 +55,7 @@ jobs:
                            -e 'generated with \[?claude code' \
                 || :)
           if [ -n "$BAD" ]; then
-            echo "::error::agent attribution in a commit message. CLAUDE.md: no agent or tool is named anywhere in this repository."
+            echo "::error::agent attribution in a commit message. No agent or tool is named anywhere in this repository."
             echo "$BAD"
             exit 1
           fi
@@ -59,7 +65,7 @@ jobs:
         run: |
           set -u
           if git grep -nIiE 'co-authored-by:.*(anthropic|claude|openai|copilot)|generated with \[?claude code' \
-               -- . ':(exclude).github/workflows/attribution.yml'; then
+               -- . ':(exclude).github/workflows/attribution.yml' ':(exclude)tools/hooks/*' ':(exclude)tools/install_hooks.sh'; then
             echo "::error::agent attribution in a tracked file."
             exit 1
           fi

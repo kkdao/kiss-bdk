@@ -1,5 +1,8 @@
 # Contributing
 
+Install local checks with `sh tools/install_hooks.sh`. Follow the full
+[publication review](docs/publication.md) before any external submission.
+
 ## Before you push
 
 ```sh

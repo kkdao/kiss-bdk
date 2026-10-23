@@ -1,0 +1,94 @@
+#!/bin/sh
+# Strip agent attribution out of every commit message, in every lane.
+#
+# The house rule has said "no agent attribution, in anything" since early on. It was
+# followed on the trunk and ignored on one branch, and 247 trailered commits
+# reached GitHub, where the merged PRs earned the account a "Pair Extraordinaire"
+# badge. Server side refs/pull/*/head are immutable, so that could not be undone.
+# A written rule is not a mechanism; this is the mechanism.
+#
+# Strips (never rejects, so no lane is blocked by it):
+#   Co-Authored-By: <any agent identity>
+#   Generated with [Claude Code](...)  / 🤖 marker lines
+# Anything else is untouched.
+#
+# Then REFUSES a message whose prose names a tool. That half cannot strip: a
+# sentence carries a fact and a trailer does not, so the only safe move is to
+# hand it back. See the block at the bottom for what it costs and why.
+set -e
+MSG="$1"
+[ -f "$MSG" ] || exit 0
+
+TMP="$MSG.attr.$$"
+grep -viE \
+  -e '^[[:space:]]*co-authored-by:.*(anthropic|claude|openai|copilot|cursor|codex|chatgpt|gpt-|gemini|devin|aider)' \
+  -e '^[[:space:]]*(🤖[[:space:]]*)?generated with \[?claude code' \
+  -e '^[[:space:]]*🤖[[:space:]]*generated with' \
+  "$MSG" > "$TMP" || :
+
+if ! cmp -s "$MSG" "$TMP"; then
+  # collapse the blank line the stripped trailer block leaves behind
+  awk 'BEGIN{n=0} {if($0~/^[[:space:]]*$/){n++}else{n=0} if(n<2)print}' "$TMP" \
+    | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "$MSG"
+  echo "commit-msg: stripped agent attribution (the actor is never the subject)" >&2
+fi
+rm -f "$TMP"
+
+# Check all prohibited names and author/committer identities before recording.
+GUARD=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().with_name("publication_guard.py"))' "$0")
+python3 "$GUARD" message "$MSG"
+
+# PROSE, which is the half the strip cannot handle. A trailer is a whole line
+# and deleting it loses nothing; a sentence naming a tool is carrying a real
+# fact, and a hook that deleted the line would delete the fact with it. So this
+# one REFUSES, and it is the only thing in this file that can hold a commit up.
+#
+# It exists because it happened. Two commits describing the REMOVAL of a
+# directory named after a tool named the tool five times between them, quoting
+# the path and the banner, and were pushed. CI passed: every check in the
+# attribution lane looked for trailers. The rule is "the actor is never the
+# subject", and a path is a subject.
+#
+# Write it around the name. "the plans stop being published under a tool's
+# name" needs no tool in the body: say what the directory held, where it went,
+# and what pointed at it.
+#
+# There is no filename exception any more. It existed for one tracked path
+# named after a tool, that path is no longer tracked, and a carve-out kept past
+# the thing it excused is how a rule quietly stops applying. The check stays
+# deliberately narrow: names, and skill or path forms that only a tool has.
+BODY=$(sed -e 's/^#.*//' "$MSG")
+HIT=$(printf '%s
+' "$BODY" | grep -inE \
+  -e '(superpowers|copilot|cursor|chatgpt|aider|devin)' \
+  -e '\bclaude\b|\banthropic\b' \
+  -e '\.claude/' \
+  -e '\bagentic\b|\bsub-?agent\b' || :)
+if [ -n "$HIT" ]; then
+  echo "commit-msg: REFUSED -- this message names a tool." >&2
+  echo "$HIT" >&2
+  echo "" >&2
+  echo "The actor is never the subject. The fact stays, the actor" >&2
+  echo "goes -- say what the thing held and where it went, not who wrote it." >&2
+  echo "This refuses rather than strips because a sentence is not a trailer:" >&2
+  echo "deleting the line would delete the fact it carries." >&2
+  exit 1
+fi
+
+# LENGTH, which only warns. The subject stays within 50 characters and body
+# lines within 72 (https://chris.beams.io/git-commit), and they are counted
+# here because counting by eye has shipped 55- and 56-character subjects that
+# looked fine. It never refuses: a pasted URL or a merge subject is rightly
+# over, and the refusal above stays the only thing in this file that holds a
+# commit up. LC_ALL=C plus dropping UTF-8 continuation bytes counts characters
+# with any awk, so an em dash is one, not three. Comment lines, and everything
+# under the scissors line `git commit -v` appends, are not the message.
+LC_ALL=C awk '
+  /^# -+ >8 -+$/ { exit }
+  /^#/ { next }
+  { n++; s = $0; gsub(/[\200-\277]/, "", s) }
+  n == 1 && /^(Merge|Revert|fixup!|squash!|amend!) / { exit }
+  n == 1 && length(s) > 50 { printf "commit-msg: subject is %d characters, limit 50\n", length(s) }
+  n > 2 && length(s) > 72 && $0 !~ /:\/\// { printf "commit-msg: body line %d is %d characters, limit 72\n", n, length(s) }
+' "$MSG" >&2
+exit 0
