@@ -253,6 +253,12 @@ enum Command {
         #[arg(long)]
         qr: bool,
 
+        /// Always show the QR as an animated BC-UR code in small parts, even
+        /// when one dense frame would fit. Lower resolution cameras, such as
+        /// Krux's, cannot read the single dense frame.
+        #[arg(long, requires = "qr")]
+        animated: bool,
+
         /// Spend received silent payments instead of the descriptor wallet's
         /// coins. KISS refuses a transaction that mixes the two, so this is a
         /// choice rather than a hint.
@@ -392,8 +398,21 @@ fn main() -> Result<()> {
             fee_rate,
             out,
             qr,
+            animated,
             from_sp,
-        } => create_psbt(&cli.wallet_dir, &to, sats, fee_rate, &out, qr, from_sp),
+        } => create_psbt(
+            &cli.wallet_dir,
+            &to,
+            sats,
+            fee_rate,
+            &out,
+            match (qr, animated) {
+                (false, _) => None,
+                (true, false) => Some(QrStyle::Fitted),
+                (true, true) => Some(QrStyle::Animated),
+            },
+            from_sp,
+        ),
         Command::Scan {
             out,
             original,
@@ -1344,13 +1363,22 @@ fn build_transaction<Cs: bdk_wallet::coin_selection::CoinSelectionAlgorithm>(
     builder.finish().context("building transaction")
 }
 
+/// How `create --qr` shows the PSBT.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QrStyle {
+    /// One static frame when it fits, animated parts when it does not.
+    Fitted,
+    /// Animated parts always, for cameras that cannot read a dense frame.
+    Animated,
+}
+
 fn create_psbt(
     wallet_dir: &Path,
     destination: &str,
     sats: u64,
     fee_rate: Option<u64>,
     out: &Path,
-    qr: bool,
+    qr: Option<QrStyle>,
     from_sp: bool,
 ) -> Result<()> {
     if sats == 0 {
@@ -1359,7 +1387,7 @@ fn create_psbt(
     if fee_rate == Some(0) {
         bail!("--fee-rate must be greater than zero");
     }
-    if !qr {
+    if qr.is_none() {
         validate_sd_psbt_path(out)?;
     }
     if out.exists() {
@@ -1367,7 +1395,7 @@ fn create_psbt(
     }
     // Either extension may be written, depending on whether one frame is
     // enough, so neither may already be there.
-    if qr {
+    if qr.is_some() {
         for extension in ["png", "gif"] {
             let path = qr_image_path(out, extension);
             if path.exists() {
@@ -1418,7 +1446,7 @@ fn create_psbt(
     // and uses the fewest inputs, which is exactly what a fixed frame budget
     // wants. Only when `--qr` is set; the file path has no such limit and keeps
     // the better privacy of the default.
-    let psbt = if qr {
+    let psbt = if qr.is_some() {
         build_transaction(
             wallet.build_tx().coin_selection(LargestFirstCoinSelection),
             sp_spend.as_ref(),
@@ -1489,7 +1517,7 @@ fn create_psbt(
         psbt.inputs.len() - sp_coins.len(),
         sp_coins.len(),
     )?;
-    if qr && estimated_signed_size > KISS_MAX_QR_PSBT_BYTES {
+    if qr.is_some() && estimated_signed_size > KISS_MAX_QR_PSBT_BYTES {
         bail!(
             "KISS's signed QR encoder holds at most {KISS_MAX_QR_PSBT_BYTES} bytes; this PSBT may grow to {estimated_signed_size} bytes"
         );
@@ -1504,10 +1532,10 @@ fn create_psbt(
     // carries its whole previous transaction, and the device's decoder handles
     // multi-part input already.
     let rendered = match qr {
-        false => None,
-        true => Some(match render_psbt_bytes_png(&serialized) {
-            Ok(png) => (qr_image_path(out, "png"), png),
-            Err(_) => (
+        None => None,
+        Some(style) => Some(match render_psbt_bytes_png(&serialized) {
+            Ok(png) if style == QrStyle::Fitted => (qr_image_path(out, "png"), png),
+            _ => (
                 qr_image_path(out, "gif"),
                 render_psbt_bytes_animated_gif(&serialized)?,
             ),
