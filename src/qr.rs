@@ -177,18 +177,37 @@ fn cbor_byte_string(bytes: &[u8]) -> Vec<u8> {
 
 /// Scan the first static QR from the selected webcam and return its text.
 pub fn scan_descriptor(camera: u32) -> Result<String> {
-    scan_camera(camera, |payload| {
-        let descriptor = payload.trim();
-        if descriptor.contains("<0;1>")
-            && (descriptor.starts_with("wpkh(")
-                || descriptor.starts_with("sh(wpkh(")
-                || descriptor.starts_with("pkh("))
-        {
-            Ok(Some(descriptor.to_owned()))
-        } else {
-            Ok(None)
-        }
-    })
+    scan_camera(camera, |payload| Ok(wallet_descriptor(payload.trim())))
+}
+
+/// The two-path descriptor KISS shows, or one built from the bare
+/// `[fingerprint/purpose'/coin'/account']xpub` that Krux and other embit
+/// signers show instead, wrapped in the script type its purpose names.
+///
+/// Anything else is `None`, so the camera keeps looking rather than failing
+/// on an unrelated code.
+fn wallet_descriptor(payload: &str) -> Option<String> {
+    if payload.contains("<0;1>")
+        && (payload.starts_with("wpkh(")
+            || payload.starts_with("sh(wpkh(")
+            || payload.starts_with("pkh("))
+    {
+        return Some(payload.to_owned());
+    }
+    let (origin, key) = payload.strip_prefix('[')?.split_once(']')?;
+    // Only the version-neutral prefixes: a zpub or vpub names its script type
+    // in the version bytes, which the descriptor parser does not read.
+    if !(key.starts_with("tpub") || key.starts_with("xpub")) || key.contains('/') {
+        return None;
+    }
+    let purpose = origin.split('/').nth(1)?.trim_end_matches(['h', 'H', '\'']);
+    let (open, close) = match purpose {
+        "84" => ("wpkh(", ")"),
+        "49" => ("sh(wpkh(", "))"),
+        "44" => ("pkh(", ")"),
+        _ => return None,
+    };
+    Some(format!("{open}[{origin}]{key}/<0;1>/*{close}"))
 }
 
 /// Scan KISS's silent payment scan-key export.
@@ -622,6 +641,33 @@ mod tests {
         ));
         assert!(!looks_like_scan_key("tsp1qqveryaddressy"));
         assert!(!looks_like_scan_key(""));
+    }
+
+    #[test]
+    fn a_bare_account_key_becomes_the_descriptor_its_purpose_names() {
+        let kiss = "wpkh([73c5da0a/84h/1h/0h]tpubDC8/<0;1>/*)";
+        assert_eq!(super::wallet_descriptor(kiss).as_deref(), Some(kiss));
+        assert_eq!(
+            super::wallet_descriptor("[73c5da0a/84'/1'/0']tpubDC8").as_deref(),
+            Some("wpkh([73c5da0a/84'/1'/0']tpubDC8/<0;1>/*)")
+        );
+        assert_eq!(
+            super::wallet_descriptor("[73c5da0a/49h/1h/0h]tpubDC8").as_deref(),
+            Some("sh(wpkh([73c5da0a/49h/1h/0h]tpubDC8/<0;1>/*))")
+        );
+        // A SLIP-132 key, a taproot purpose and a scan key are not this.
+        assert_eq!(
+            super::wallet_descriptor("[73c5da0a/84h/1h/0h]vpub5Y6"),
+            None
+        );
+        assert_eq!(
+            super::wallet_descriptor("[73c5da0a/86h/1h/0h]tpubDC8"),
+            None
+        );
+        assert_eq!(
+            super::wallet_descriptor("[73c5da0a/352h/1h/0h]tspscan1qq"),
+            None
+        );
     }
 
     use super::*;
