@@ -137,13 +137,22 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-/// Unwrap `sp([origin]key)` down to the key, leaving a bare key alone.
+/// Unwrap `sp([origin]key)` or `[origin]key` down to the key, leaving a bare
+/// key alone.
 fn strip_descriptor(export: &str) -> Result<&str> {
     let Some(rest) = export
         .strip_prefix("sp(")
         .or_else(|| export.strip_prefix("SP("))
     else {
-        return Ok(export);
+        // Krux and other embit signers show the key with its origin but no
+        // sp() around it.
+        let Some(after) = export.strip_prefix('[') else {
+            return Ok(export);
+        };
+        let (_origin, key) = after
+            .split_once(']')
+            .context("scan key has an unterminated key origin")?;
+        return Ok(key);
     };
     let inner = rest
         .strip_suffix(')')
@@ -244,6 +253,18 @@ mod tests {
         let bare = encode(TESTNET_HRP, &payload(), 0);
         assert_eq!(
             parse_scan_export(&bare).unwrap(),
+            parse_scan_export(&export()).unwrap()
+        );
+    }
+
+    #[test]
+    fn accepts_the_key_with_its_origin_as_krux_shows_it() {
+        let krux = format!(
+            "[73c5da0a/352h/1h/0h]{}",
+            encode(TESTNET_HRP, &payload(), 0)
+        );
+        assert_eq!(
+            parse_scan_export(&krux).unwrap(),
             parse_scan_export(&export()).unwrap()
         );
     }

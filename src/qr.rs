@@ -227,12 +227,17 @@ pub fn scan_scan_key(camera: u32) -> Result<String> {
     })
 }
 
-/// Accept the wrapped descriptor KISS prints and the bare key inside it.
+/// Accept the wrapped descriptor KISS prints and the bare key inside it, with
+/// or without the `[fingerprint/path]` origin Krux puts in front.
 fn looks_like_scan_key(export: &str) -> bool {
     let lower = export.to_ascii_lowercase();
+    let key = lower
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(']'))
+        .map_or(lower.as_str(), |(_, key)| key);
     // The mainnet prefix is recognised so the import can refuse it by name
     // rather than leave the camera running on a QR it will never match.
-    lower.starts_with("sp([") || lower.starts_with("tspscan1") || lower.starts_with("spscan1")
+    lower.starts_with("sp([") || key.starts_with("tspscan1") || key.starts_with("spscan1")
 }
 
 /// Scan a KISS-signed PSBT from a static base64 or BC-UR `crypto-psbt` QR.
@@ -641,6 +646,13 @@ mod tests {
         ));
         assert!(!looks_like_scan_key("tsp1qqveryaddressy"));
         assert!(!looks_like_scan_key(""));
+    }
+
+    #[test]
+    fn the_scan_key_filter_takes_a_bare_key_with_its_origin() {
+        // Krux prints embit's SPScanKey this way, with no sp() around it.
+        assert!(looks_like_scan_key("[73c5da0a/352h/1h/0h]tspscan1qqqq"));
+        assert!(!looks_like_scan_key("[73c5da0a/84h/1h/0h]tpubDC8"));
     }
 
     #[test]
