@@ -53,6 +53,20 @@ fn accepts_a_signer_that_only_filled_in_the_scripts() {
 }
 
 #[test]
+fn accepts_a_signer_that_trimmed_its_input_derivations() {
+    // Krux sends its signed PSBT back without the inputs' BIP-32 derivations;
+    // the coordinator's own copy still has them.
+    for signed in &signed_vectors() {
+        let original = as_sent(signed);
+        let mut trimmed = signed.clone();
+        for input in &mut trimmed.inputs {
+            input.bip32_derivations.clear();
+        }
+        assert!(!spverify::verify(&original, &trimmed).unwrap().is_empty());
+    }
+}
+
+#[test]
 fn rejects_a_signer_that_redirected_the_payment() {
     // The whole point of the check: a script that is not what the share derives
     // to means the money is going somewhere the user did not ask for.

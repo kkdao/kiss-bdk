@@ -34,7 +34,11 @@ pub fn verify(original: &PsbtV2, signed: &PsbtV2) -> Result<Vec<VerifiedOutput>>
     same_transaction(original, signed)?;
 
     let outpoints = outpoints(signed);
-    let a_sum = input_key_sum(signed)?;
+    // The keys come from the original: it is this coordinator's own record of
+    // its inputs, and a signer may trim derivations from what it sends back
+    // (Krux does, to keep the QR small). same_transaction has already tied the
+    // two to the same inputs.
+    let a_sum = input_key_sum(original)?;
     let input_hash = derive::input_hash(&outpoints, &a_sum)?;
 
     let mut verified = Vec::new();
