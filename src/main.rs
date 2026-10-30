@@ -1597,7 +1597,7 @@ fn create_psbt(
     } else {
         println!("next: copy the PSBT to SD, review/sign it on KISS, then run:");
         println!(
-            "kiss-bdk --wallet-dir {} broadcast <signed.psbt> --original {} --dry-run",
+            "kiss-bdk --wallet-dir {} broadcast <signed.psbt> --original {}",
             wallet_dir.display(),
             out.display()
         );
@@ -1780,11 +1780,12 @@ fn scan_psbt(wallet_dir: &Path, out: &Path, original_path: &Path, camera: u32) -
     write_new_file(out, &scanned)?;
     println!("wrote {}", out.display());
     println!(
-        "next: kiss-bdk --wallet-dir {} broadcast {} --original {} --dry-run",
+        "next: kiss-bdk --wallet-dir {} broadcast {} --original {}",
         wallet_dir.display(),
         out.display(),
         original_path.display()
     );
+    println!("(add --dry-run to check it without sending)");
     Ok(())
 }
 
