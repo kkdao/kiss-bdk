@@ -206,6 +206,8 @@ fn wallet_descriptor(payload: &str) -> Option<String> {
         "44" => ("pkh(", ")"),
         _ => return None,
     };
+    // ShieldSigner writes 84'/1'/0'; the account check reads the h spelling.
+    let origin = origin.replace(['\'', 'H'], "h");
     Some(format!("{open}[{origin}]{key}/<0;1>/*{close}"))
 }
 
@@ -682,7 +684,7 @@ mod tests {
         assert_eq!(super::wallet_descriptor(kiss).as_deref(), Some(kiss));
         assert_eq!(
             super::wallet_descriptor("[73c5da0a/84'/1'/0']tpubDC8").as_deref(),
-            Some("wpkh([73c5da0a/84'/1'/0']tpubDC8/<0;1>/*)")
+            Some("wpkh([73c5da0a/84h/1h/0h]tpubDC8/<0;1>/*)")
         );
         assert_eq!(
             super::wallet_descriptor("[73c5da0a/49h/1h/0h]tpubDC8").as_deref(),
@@ -693,7 +695,7 @@ mod tests {
         assert_eq!(
             super::wallet_descriptor(vpub).as_deref(),
             Some(
-                "wpkh([73c5da0a/84'/1'/0']tpubDC8msFGeGuwnKG9Upg7DM2b4DaRqg3CUZa5g8v2SRQ6K4NSkxUgd7HsL2XVWbVm39yBA4LAxysQAm397zwQSQoQgewGiYZqrA9DsP4zbQ1M/<0;1>/*)"
+                "wpkh([73c5da0a/84h/1h/0h]tpubDC8msFGeGuwnKG9Upg7DM2b4DaRqg3CUZa5g8v2SRQ6K4NSkxUgd7HsL2XVWbVm39yBA4LAxysQAm397zwQSQoQgewGiYZqrA9DsP4zbQ1M/<0;1>/*)"
             )
         );
         // A key that does not decode, a taproot purpose and a scan key are not this.
