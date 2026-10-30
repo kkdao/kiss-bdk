@@ -195,11 +195,10 @@ fn wallet_descriptor(payload: &str) -> Option<String> {
         return Some(payload.to_owned());
     }
     let (origin, key) = payload.strip_prefix('[')?.split_once(']')?;
-    // Only the version-neutral prefixes: a zpub or vpub names its script type
-    // in the version bytes, which the descriptor parser does not read.
-    if !(key.starts_with("tpub") || key.starts_with("xpub")) || key.contains('/') {
+    if key.contains('/') {
         return None;
     }
+    let key = neutral_xpub(key)?;
     let purpose = origin.split('/').nth(1)?.trim_end_matches(['h', 'H', '\'']);
     let (open, close) = match purpose {
         "84" => ("wpkh(", ")"),
@@ -208,6 +207,28 @@ fn wallet_descriptor(payload: &str) -> Option<String> {
         _ => return None,
     };
     Some(format!("{open}[{origin}]{key}/<0;1>/*{close}"))
+}
+
+/// The key with SLIP-132 version bytes (vpub, zpub, upub, ypub) swapped for
+/// the neutral tpub or xpub the descriptor parser reads. ShieldSigner's static
+/// export and Krux's second key option use these; the purpose in the origin
+/// already says which script they mean. Any other key is `None`.
+fn neutral_xpub(key: &str) -> Option<String> {
+    use bdk_wallet::bitcoin::base58;
+    const TPUB: [u8; 4] = [0x04, 0x35, 0x87, 0xcf];
+    const XPUB: [u8; 4] = [0x04, 0x88, 0xb2, 0x1e];
+    let neutral = match key.get(..4)? {
+        "tpub" | "xpub" => return Some(key.to_owned()),
+        "vpub" | "upub" => TPUB,
+        "zpub" | "ypub" => XPUB,
+        _ => return None,
+    };
+    let mut raw = base58::decode_check(key).ok()?;
+    if raw.len() != 78 {
+        return None;
+    }
+    raw[..4].copy_from_slice(&neutral);
+    Some(base58::encode_check(&raw))
 }
 
 /// Scan KISS's silent payment scan-key export.
@@ -667,7 +688,15 @@ mod tests {
             super::wallet_descriptor("[73c5da0a/49h/1h/0h]tpubDC8").as_deref(),
             Some("sh(wpkh([73c5da0a/49h/1h/0h]tpubDC8/<0;1>/*))")
         );
-        // A SLIP-132 key, a taproot purpose and a scan key are not this.
+        // The same account key as KISS's tpub, spelled as a SLIP-132 vpub.
+        let vpub = "[73c5da0a/84'/1'/0']vpub5Y6cjg78GGuNLsaPhmYsiw4gYX3HoQiRBiSwDaBXKUafCt9bNwWQiitDk5VZ5BVxYnQdwoTyXSs2JHRPAgjAvtbBrf8ZhDYe2jWAqvZVnsc";
+        assert_eq!(
+            super::wallet_descriptor(vpub).as_deref(),
+            Some(
+                "wpkh([73c5da0a/84'/1'/0']tpubDC8msFGeGuwnKG9Upg7DM2b4DaRqg3CUZa5g8v2SRQ6K4NSkxUgd7HsL2XVWbVm39yBA4LAxysQAm397zwQSQoQgewGiYZqrA9DsP4zbQ1M/<0;1>/*)"
+            )
+        );
+        // A key that does not decode, a taproot purpose and a scan key are not this.
         assert_eq!(
             super::wallet_descriptor("[73c5da0a/84h/1h/0h]vpub5Y6"),
             None
