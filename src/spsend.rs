@@ -191,6 +191,15 @@ fn compressed_derivations(
         .collect()
 }
 
+/// Serialize a PSBTv2 the way BIP-375 wants it on the wire.
+///
+/// Everything that hands a PSBTv2 to a signer or to another wallet goes
+/// through here, so a silent payment output whose script is not derived yet
+/// never carries an empty `PSBT_OUT_SCRIPT`.
+pub fn serialize_v2(psbt: &psbt_v2::v2::Psbt) -> Result<Vec<u8>> {
+    strip_empty_output_scripts(&psbt.serialize(), psbt.inputs.len())
+}
+
 /// Remove the zero-length `PSBT_OUT_SCRIPT` that psbt-v2 0.3.0 writes for every
 /// output, including silent payment ones.
 ///

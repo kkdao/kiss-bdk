@@ -21,6 +21,8 @@ pub mod dleq;
 pub mod electrum;
 mod k_quirc;
 pub mod qr;
+pub mod shared;
+pub mod sharedflow;
 pub mod sp;
 pub mod spreceive;
 pub mod spscan;
