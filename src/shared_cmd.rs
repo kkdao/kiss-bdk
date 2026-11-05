@@ -72,6 +72,16 @@ pub enum SharedCommand {
     /// Where this wallet's shared send stands.
     Status,
 
+    /// Used by start and join: read one signer answer with the webcam and
+    /// write its bytes to OUT, in a process of its own.
+    #[command(hide = true)]
+    ScanAnswer {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        camera: u32,
+    },
+
     /// File step, wallet A: write the proposal message for the other wallet.
     Propose {
         #[arg(long)]
@@ -221,6 +231,14 @@ pub fn run(wallet_dir: &Path, command: SharedCommand) -> Result<()> {
                 Some(terms),
             )
         }
+        SharedCommand::ScanAnswer { out, camera } => match scan_signed_psbt_bytes(camera) {
+            Ok(bytes) => {
+                fs::write(&out, bytes).with_context(|| format!("writing {}", out.display()))
+            }
+            // Not an error to print: the parent says it is still waiting.
+            Err(error) if is_camera_timeout(&error) => std::process::exit(SCAN_TIMEOUT_EXIT),
+            Err(error) => Err(error),
+        },
         SharedCommand::Status => {
             let saved = store.load()?;
             match &saved.session {
@@ -628,6 +646,42 @@ struct CameraSigner {
     last_request: Vec<u8>,
 }
 
+/// Exit code of `shared scan-answer` when no QR came into view in time.
+const SCAN_TIMEOUT_EXIT: i32 = 4;
+
+/// One webcam read in a short process of its own, exactly as `kiss-bdk scan`
+/// does it. The macOS camera binding keeps the device locked for as long as
+/// the process that opened it lives, so a long running start or join that
+/// read the camera itself kept it from the other wallet's command for the
+/// rest of the send ("Lock Rejected"). The lock now ends with the read.
+fn scan_in_own_process(camera: u32, wallet_dir: &Path) -> Result<Vec<u8>> {
+    let out = wallet_dir.join("shared-answer-scan.tmp");
+    let _ = fs::remove_file(&out);
+    let exe = std::env::current_exe().context("finding the kiss-bdk program")?;
+    let status = std::process::Command::new(exe)
+        .arg("--wallet-dir")
+        .arg(wallet_dir)
+        .args([
+            "shared",
+            "scan-answer",
+            "--camera",
+            &camera.to_string(),
+            "--out",
+        ])
+        .arg(&out)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .context("starting the webcam read")?;
+    match status.code() {
+        Some(0) => {}
+        Some(SCAN_TIMEOUT_EXIT) => bail!("no complete QR was scanned within 120 seconds"),
+        _ => bail!("the webcam read failed (its reason is printed above)"),
+    }
+    let bytes = fs::read(&out).with_context(|| format!("reading {}", out.display()))?;
+    let _ = fs::remove_file(&out);
+    Ok(bytes)
+}
+
 /// The webcam scan gave up because no complete QR came into view in time.
 fn is_camera_timeout(error: &anyhow::Error) -> bool {
     error
@@ -665,7 +719,7 @@ impl SignerLink for CameraSigner {
         // take longer than one webcam timeout, so keep waiting for the
         // answer instead of ending the command.
         loop {
-            match scan_signed_psbt_bytes(self.camera) {
+            match scan_in_own_process(self.camera, &self.wallet_dir) {
                 Err(error) if is_camera_timeout(&error) => {
                     println!("still waiting for the signer's QR...");
                 }
