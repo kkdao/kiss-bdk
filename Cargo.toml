@@ -9,6 +9,8 @@ description = "Experimental test-network coordinator for the KISS offline signin
 license = "MIT"
 repository = "https://github.com/kkdao/kiss-bdk"
 readme = "README.md"
+# `cargo run` keeps meaning the coordinator now that a second binary exists.
+default-run = "kiss-bdk"
 
 [dependencies]
 anyhow = "1.0"
@@ -56,6 +58,11 @@ marmot = [
     "dep:openmls_traits",
     "dep:tokio",
 ]
+
+[[bin]]
+name = "kiss-marmot"
+path = "src/bin/kiss-marmot.rs"
+required-features = ["marmot"]
 
 [[test]]
 name = "marmot_local"
