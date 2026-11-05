@@ -1756,24 +1756,6 @@ fn qr_image_path(psbt_path: &Path, extension: &str) -> PathBuf {
 }
 
 fn open_qr_image(path: &Path) {
-    // Preview, the default for a GIF, shows an animated QR as a stack of
-    // still pages to click through, which no signer camera can read. Safari
-    // plays it; the default app is the fallback.
-    #[cfg(target_os = "macos")]
-    let animated = path
-        .extension()
-        .is_some_and(|ext| ext == "gif" || ext == "html");
-    #[cfg(target_os = "macos")]
-    if animated
-        && ProcessCommand::new("open")
-            .args(["-a", "Safari"])
-            .arg(path)
-            .status()
-            .is_ok_and(|status| status.success())
-    {
-        println!("opened {} in Safari", path.display());
-        return;
-    }
     #[cfg(target_os = "macos")]
     if ProcessCommand::new("open")
         .arg(path)
