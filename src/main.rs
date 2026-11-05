@@ -36,6 +36,8 @@ use kiss_bdk::{
 };
 use serde::{Deserialize, Serialize};
 
+mod shared_cmd;
+
 const STOP_GAP: usize = 50;
 const PARALLEL_REQUESTS: usize = 2;
 const ESPLORA_TIMEOUT_SECS: u64 = 30;
@@ -360,6 +362,13 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Pay one silent payment together with another wallet, each signing
+    /// its own coins on its own signer.
+    Shared {
+        #[command(subcommand)]
+        command: shared_cmd::SharedCommand,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -450,6 +459,7 @@ fn main() -> Result<()> {
             original,
             dry_run,
         } => broadcast(&cli.wallet_dir, &psbt, &original, dry_run),
+        Command::Shared { command } => shared_cmd::run(&cli.wallet_dir, command),
     }
 }
 

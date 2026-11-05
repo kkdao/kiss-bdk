@@ -1468,3 +1468,174 @@ fn two_signers_pay_one_silent_payment_over_a_channel_folder() {
         assert!(session.outbox.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// The same send through the command line's file steps
+
+fn kiss_bdk(wallet_dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_kiss-bdk"))
+        .arg("--wallet-dir")
+        .arg(wallet_dir)
+        .args(args)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{args:?} failed: {stdout}{stderr}");
+    stdout
+}
+
+/// A regtest wallet folder made by `init`, holding the same 50 000 sat coin
+/// the other tests use.
+fn wallet_folder(root: &std::path::Path, name: &str, signer: &RefSigner) -> std::path::PathBuf {
+    let dir = root.join(name);
+    let descriptor = signer.descriptor();
+    kiss_bdk(
+        &dir,
+        &[
+            "init",
+            "--network",
+            "regtest",
+            "--descriptor",
+            &descriptor,
+            "--esplora",
+            "http://127.0.0.1:1",
+        ],
+    );
+    let (external, internal) = split_kiss_descriptor(&descriptor).unwrap();
+    let mut connection = bdk_wallet::rusqlite::Connection::open(dir.join("wallet.sqlite")).unwrap();
+    let mut wallet = Wallet::load()
+        .descriptor(bdk_wallet::KeychainKind::External, Some(external.clone()))
+        .descriptor(bdk_wallet::KeychainKind::Internal, Some(internal.clone()))
+        .load_wallet(&mut connection)
+        .unwrap()
+        .unwrap();
+    let (_, _, funding) = new_wallet_and_funding_update(&external, Some(&internal));
+    wallet.apply_update(funding).unwrap();
+    wallet.persist(&mut connection).unwrap();
+    dir
+}
+
+/// Take a request file to a reference signer and leave its answer beside it.
+fn sign_file(signer: &RefSigner, request: &std::path::Path, answer: &std::path::Path) {
+    let outcome = signer.sign(&std::fs::read(request).unwrap()).unwrap();
+    std::fs::write(answer, outcome.bytes()).unwrap();
+}
+
+#[test]
+fn two_signers_pay_one_silent_payment_through_the_file_steps() {
+    let payee = payee();
+    let (signer_a, signer_b) = (signer_a(), signer_b());
+    let root = tempfile::tempdir().unwrap();
+    let a = wallet_folder(root.path(), "a", &signer_a);
+    let b = wallet_folder(root.path(), "b", &signer_b);
+    let file = |name: &str| root.path().join(name);
+    let path = |name: &str| file(name).to_str().unwrap().to_string();
+    let sats = SATS.to_string();
+    let fee_rate = FEE_RATE.to_string();
+
+    kiss_bdk(
+        &a,
+        &[
+            "shared",
+            "propose",
+            "--to",
+            &payee.address,
+            "--sats",
+            &sats,
+            "--fee-rate",
+            &fee_rate,
+            "--out",
+            &path("proposal.json"),
+        ],
+    );
+    let joined = kiss_bdk(&b, &["shared", "accept", &path("proposal.json")]);
+    assert!(joined.contains("joined shared send"), "{joined}");
+    let status = kiss_bdk(&b, &["shared", "status"]);
+    assert!(status.contains("share missing, not signed"), "{status}");
+
+    // B's signer: share only.
+    let said = kiss_bdk(&b, &["shared", "request", "--out", &path("b1.psbt")]);
+    assert!(said.contains("only adds your signer's share"), "{said}");
+    sign_file(&signer_b, &file("b1.psbt"), &file("b1-signed.psbt"));
+    let said = kiss_bdk(
+        &b,
+        &[
+            "shared",
+            "answer",
+            &path("b1-signed.psbt"),
+            "--out",
+            &path("b1.json"),
+        ],
+    );
+    assert!(said.contains("input 1 share proof OK"), "{said}");
+
+    // A's signer: completes the shares and signs.
+    let said = kiss_bdk(&a, &["shared", "receive", &path("b1.json")]);
+    assert!(said.contains("joined: 2 inputs, 3 outputs"), "{said}");
+    let said = kiss_bdk(&a, &["shared", "request", "--out", &path("a1.psbt")]);
+    assert!(said.contains("reviews and signs"), "{said}");
+    sign_file(&signer_a, &file("a1.psbt"), &file("a1-signed.psbt"));
+    let said = kiss_bdk(
+        &a,
+        &[
+            "shared",
+            "answer",
+            &path("a1-signed.psbt"),
+            "--out",
+            &path("a1.json"),
+        ],
+    );
+    assert!(said.contains("input 0 signature OK"), "{said}");
+
+    // B's signer: checks everything and signs.
+    kiss_bdk(&b, &["shared", "receive", &path("a1.json")]);
+    kiss_bdk(&b, &["shared", "request", "--out", &path("b2.psbt")]);
+    sign_file(&signer_b, &file("b2.psbt"), &file("b2-signed.psbt"));
+    let said = kiss_bdk(
+        &b,
+        &[
+            "shared",
+            "answer",
+            &path("b2-signed.psbt"),
+            "--out",
+            &path("b2.json"),
+        ],
+    );
+    assert!(said.contains("input 1 signature OK"), "{said}");
+
+    // Either side can finalize the same transaction.
+    let printed = kiss_bdk(
+        &b,
+        &[
+            "shared",
+            "broadcast",
+            "--dry-run",
+            "--out",
+            &path("done.json"),
+        ],
+    );
+    let hex = printed.lines().next().unwrap();
+    let tx: Transaction = bdk_wallet::bitcoin::consensus::encode::deserialize_hex(hex).unwrap();
+    kiss_bdk(&a, &["shared", "receive", &path("b2.json")]);
+    let from_a = kiss_bdk(
+        &a,
+        &[
+            "shared",
+            "broadcast",
+            "--dry-run",
+            "--out",
+            &path("done-a.json"),
+        ],
+    );
+    assert_eq!(from_a.lines().next().unwrap(), hex);
+
+    let saved: sharedflow::Saved =
+        serde_json::from_slice(&std::fs::read(b.join(sharedflow::SESSION_FILE)).unwrap()).unwrap();
+    let state = saved.session.unwrap().state().unwrap();
+    let coins = prevouts(&state);
+    assert_signatures_verify(&tx, &coins);
+    assert_fee_rate(&tx, &coins, FEE_RATE);
+    let keys = private_keys(&state, &[&signer_a, &signer_b]);
+    assert_pays(&tx, &coins, &keys, &payee, SATS);
+}
