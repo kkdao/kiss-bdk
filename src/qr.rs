@@ -56,10 +56,10 @@ pub fn render_psbt_bytes_png(psbt: &[u8]) -> Result<Vec<u8>> {
 /// repeats to recover a fountain-coded part it missed. Faster than this and a
 /// phone-class sensor starts dropping frames; slower and a long PSBT takes
 /// visibly forever.
-const UR_FRAME_DELAY_MS: u32 = 250;
+const UR_FRAME_DELAY_MS: u32 = 400;
 
 /// Largest fragment tried first, then halved until every frame fits the camera.
-const UR_FRAGMENT_START: usize = 200;
+const UR_FRAGMENT_START: usize = 90;
 
 /// Render a PSBT as an animated `crypto-psbt` QR.
 ///
