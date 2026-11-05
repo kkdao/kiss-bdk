@@ -136,7 +136,9 @@ pub fn render_psbt_bytes_animated_html(psbt: &[u8]) -> Result<String> {
         );
     }
     let cbor = cbor_byte_string(psbt);
-    let mut fragment = UR_FRAGMENT_START;
+    // The dense frames Krux read without trouble when Preview showed them
+    // one at a time: fewer of them, each held long enough to be read.
+    let mut fragment = 200;
     let frames = loop {
         match ur_frames(&cbor, fragment) {
             Ok(frames) => break frames,
@@ -170,11 +172,11 @@ pub fn render_psbt_bytes_animated_html(psbt: &[u8]) -> Result<String> {
 <style>html,body{{margin:0;height:100%;background:#fff}}\
 body{{display:flex;align-items:center;justify-content:center}}\
 img{{height:92vh;width:92vh;image-rendering:pixelated;image-rendering:crisp-edges}}\
-p{{position:fixed;bottom:4px;left:8px;font:14px sans-serif;color:#888;margin:0}}</style>\
+p{{position:fixed;bottom:4px;left:8px;font:16px sans-serif;color:#666;margin:0}}</style>\
 <img id=q alt=QR><p id=n></p><script>\
 const f=[{}];let i=0;const q=document.getElementById('q'),n=document.getElementById('n');\
-function s(){{q.src=f[i];n.textContent=(i+1)+'/'+f.length;i=(i+1)%f.length}}\
-s();setInterval(s,{UR_FRAME_DELAY_MS});</script>",
+function d(){{q.src=f[i];n.textContent=(i+1)+'/'+f.length}}\
+d();setInterval(()=>{{i=(i+1)%f.length;d()}},1000);</script>",
         sources.join(",")
     ))
 }
