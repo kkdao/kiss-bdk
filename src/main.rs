@@ -1756,6 +1756,26 @@ fn qr_image_path(psbt_path: &Path, extension: &str) -> PathBuf {
 }
 
 fn open_qr_image(path: &Path) {
+    // Preview shows an animated GIF as still pages to click through. Quick
+    // Look plays it, so an animated QR opens there, one window at a time.
+    #[cfg(target_os = "macos")]
+    if path.extension().is_some_and(|ext| ext == "gif") {
+        let _ = ProcessCommand::new("pkill")
+            .args(["-f", "qlmanage -p"])
+            .status();
+        if ProcessCommand::new("qlmanage")
+            .arg("-p")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            println!("opened {} in Quick Look", path.display());
+            return;
+        }
+    }
     #[cfg(target_os = "macos")]
     if ProcessCommand::new("open")
         .arg(path)
