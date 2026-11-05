@@ -1522,8 +1522,13 @@ fn kiss_bdk(wallet_dir: &std::path::Path, args: &[&str]) -> String {
 /// A regtest wallet folder made by `init`, holding the same 50 000 sat coin
 /// the other tests use.
 fn wallet_folder(root: &std::path::Path, name: &str, signer: &RefSigner) -> std::path::PathBuf {
+    descriptor_folder(root, name, &signer.descriptor())
+}
+
+/// The same for any descriptor in the form `init` reads.
+fn descriptor_folder(root: &std::path::Path, name: &str, descriptor: &str) -> std::path::PathBuf {
     let dir = root.join(name);
-    let descriptor = signer.descriptor();
+    let descriptor = descriptor.to_owned();
     kiss_bdk(
         &dir,
         &[
@@ -2026,4 +2031,258 @@ fn real_signers_kiss_refuses_a_corrupted_krux_share() {
 #[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
 fn real_signers_krux_refuses_a_corrupted_kiss_share() {
     real_refuses_a_corrupted_foreign_share(Bridge::krux(), Bridge::kiss());
+}
+
+// ---------------------------------------------------------------------------
+// `shared start` and `shared join` themselves, as two processes
+//
+// The long running commands with the QR and the webcam swapped for a bridge
+// (KISS_BDK_TEST_SIGNER) and the broadcast for a printout
+// (KISS_BDK_TEST_NO_BROADCAST). Same variables as the other real signer
+// tests:
+//
+//     cargo test --test shared_send real_signers -- --ignored
+
+/// How long one whole two process send may take.
+const COMMAND_DEADLINE: Duration = Duration::from_secs(240);
+
+/// One long running `kiss-bdk shared ...` with its output in a file.
+struct Running {
+    child: std::process::Child,
+    log: std::path::PathBuf,
+}
+
+impl Running {
+    fn start(
+        wallet_dir: &std::path::Path,
+        signer: &std::path::Path,
+        args: &[&str],
+        log: std::path::PathBuf,
+    ) -> Running {
+        let out = std::fs::File::create(&log).unwrap();
+        let err = out.try_clone().unwrap();
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_kiss-bdk"))
+            .arg("--wallet-dir")
+            .arg(wallet_dir)
+            .arg("shared")
+            .args(args)
+            .env("KISS_BDK_TEST_SIGNER", signer)
+            .env("KISS_BDK_TEST_NO_BROADCAST", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(out)
+            .stderr(err)
+            .spawn()
+            .unwrap();
+        Running { child, log }
+    }
+
+    fn said(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Wait for it to end by itself, and return what it said.
+    fn finish(mut self, until: std::time::Instant) -> String {
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                let said = self.said();
+                assert!(status.success(), "{status}: {said}");
+                return said;
+            }
+            if std::time::Instant::now() > until {
+                let _ = self.child.kill();
+                panic!("still running after {COMMAND_DEADLINE:?}: {}", self.said());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    fn kill(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+fn session_in(wallet_dir: &std::path::Path) -> Option<Session> {
+    let bytes = std::fs::read(wallet_dir.join(sharedflow::SESSION_FILE)).ok()?;
+    serde_json::from_slice::<sharedflow::Saved>(&bytes)
+        .ok()?
+        .session
+}
+
+/// The txid after `done: ` in what a command said.
+fn done_txid(said: &str) -> String {
+    said.lines()
+        .find_map(|line| line.strip_prefix("done: "))
+        .unwrap_or_else(|| panic!("no done line: {said}"))
+        .trim()
+        .to_owned()
+}
+
+/// Wallet A on `start`'s bridge runs `shared start`, wallet B on `join`'s
+/// runs `shared join`, each as its own process. With `kill_join`, B is
+/// killed once its signer's first answer is saved and started again.
+fn two_processes(
+    start: Bridge,
+    join: Bridge,
+    kill_join: bool,
+    channel: impl FnOnce(&std::path::Path, &std::path::Path, &std::path::Path) -> String,
+) {
+    let payee = payee();
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let a = descriptor_folder(root.path(), "a", &bridge::kiss_form(&start.descriptor()));
+    let b = descriptor_folder(root.path(), "b", &bridge::kiss_form(&join.descriptor()));
+    let channel = channel(root.path(), &a, &b);
+    let signer_a = start.script(root.path());
+    let signer_b = join.script(root.path());
+    let sats = SATS.to_string();
+    let fee_rate = FEE_RATE.to_string();
+    let until = std::time::Instant::now() + COMMAND_DEADLINE;
+    let join_args = ["join", "--channel", channel.as_str()];
+
+    let a_run = Running::start(
+        &a,
+        &signer_a,
+        &[
+            "start",
+            "--to",
+            &payee.address,
+            "--sats",
+            &sats,
+            "--fee-rate",
+            &fee_rate,
+            "--channel",
+            &channel,
+            "--animated",
+        ],
+        root.path().join("a.log"),
+    );
+    let mut b_run = Running::start(&b, &signer_b, &join_args, root.path().join("b.log"));
+    if kill_join {
+        while session_in(&b).is_none_or(|session| session.visits == 0) {
+            assert!(
+                std::time::Instant::now() < until,
+                "B's signer never answered: {}",
+                b_run.said()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        b_run.kill();
+        b_run = Running::start(&b, &signer_b, &join_args, root.path().join("b2.log"));
+    }
+    let said_b = b_run.finish(until);
+    let said_a = a_run.finish(until);
+
+    let txid = done_txid(&said_b);
+    assert_eq!(done_txid(&said_a), txid, "A: {said_a}\nB: {said_b}");
+    assert!(
+        said_a.contains(&format!("the other wallet broadcast the payment: {txid}")),
+        "{said_a}"
+    );
+    assert!(!said_a.contains("dry run:"), "A broadcast too: {said_a}");
+    let hex = said_b
+        .lines()
+        .zip(said_b.lines().skip(1))
+        .find_map(|(hex, next)| (next == format!("dry run: {txid} was not sent")).then_some(hex))
+        .unwrap_or_else(|| panic!("B printed no transaction: {said_b}"));
+    let tx: Transaction = bdk_wallet::bitcoin::consensus::encode::deserialize_hex(hex).unwrap();
+    assert_eq!(tx.compute_txid().to_string(), txid);
+
+    for wallet in [&a, &b] {
+        let session = session_in(wallet).unwrap();
+        assert_eq!(session.stage, Stage::Done);
+        assert_eq!(session.txid.as_deref(), Some(txid.as_str()));
+    }
+    // Every request was drawn as the QR the signer would scan: A's always
+    // animated (--animated), B's as one frame when it fits.
+    let drawn = |wallet: &std::path::Path, visit: u32, extension: &str| {
+        let session = session_in(wallet).unwrap().session;
+        wallet
+            .join(format!("shared-{session}-visit{visit}-qr.{extension}"))
+            .exists()
+    };
+    assert!(drawn(&a, 1, "gif"), "A's request has no animated QR");
+    assert!(!drawn(&a, 1, "png"), "A's request was drawn as one frame");
+    for visit in [1, 2] {
+        assert!(
+            drawn(&b, visit, "png") || drawn(&b, visit, "gif"),
+            "B's request {visit} has no QR"
+        );
+    }
+    let state = session_in(&b).unwrap().state().unwrap();
+    let coins = prevouts(&state);
+    assert_signatures_verify(&tx, &coins);
+    assert_fee_rate(&tx, &coins, FEE_RATE);
+    assert_received(&tx, &state, &payee, SATS);
+}
+
+fn dir_channel(root: &std::path::Path, _: &std::path::Path, _: &std::path::Path) -> String {
+    format!("dir:{}", root.join("channel").display())
+}
+
+#[test]
+#[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
+fn real_signers_shared_start_and_join_as_two_processes() {
+    two_processes(Bridge::kiss(), Bridge::krux(), false, dir_channel);
+}
+
+#[test]
+#[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
+fn real_signers_shared_join_resumes_after_being_killed() {
+    two_processes(Bridge::kiss(), Bridge::krux(), true, dir_channel);
+}
+
+/// A Marmot group between the two wallet folders over `relay`, set up by
+/// hand with `kiss-marmot` as the demo does.
+#[cfg(feature = "marmot")]
+fn marmot_channel(
+    relay: &str,
+) -> impl FnOnce(&std::path::Path, &std::path::Path, &std::path::Path) -> String {
+    move |_, a, b| {
+        let marmot = |dir: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new(env!("CARGO_BIN_EXE_kiss-marmot"))
+                .arg("--wallet-dir")
+                .arg(dir)
+                .arg("--relay")
+                .arg(relay)
+                .args(args)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            assert!(
+                output.status.success(),
+                "kiss-marmot {args:?}: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            stdout
+        };
+        let npub_b = marmot(b, &["init"]).trim().to_owned();
+        marmot(a, &["init"]);
+        marmot(a, &["invite", &npub_b]);
+        marmot(b, &["accept", "--wait", "30"]);
+        "marmot".to_owned()
+    }
+}
+
+#[cfg(feature = "marmot")]
+#[test]
+#[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
+fn real_signers_shared_start_and_join_over_marmot() {
+    let relay = kiss_bdk::marmot::LocalRelay::start(0).unwrap();
+    let url = relay.url().to_string();
+    two_processes(Bridge::kiss(), Bridge::krux(), false, marmot_channel(&url));
+}
+
+#[cfg(feature = "marmot")]
+#[test]
+#[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
+fn real_signers_shared_join_resumes_over_marmot() {
+    let relay = kiss_bdk::marmot::LocalRelay::start(0).unwrap();
+    let url = relay.url().to_string();
+    two_processes(Bridge::kiss(), Bridge::krux(), true, marmot_channel(&url));
 }

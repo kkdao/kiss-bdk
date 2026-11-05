@@ -111,6 +111,39 @@ impl Bridge {
         last_line(&output.stdout)
     }
 
+    /// A shell script in `dir` that runs this bridge with its seed, for a
+    /// program that only takes a command line, such as `kiss-bdk` under
+    /// `KISS_BDK_TEST_SIGNER`. Each run of the KISS bridge gets its own
+    /// fresh `KISS_SIM_TMP`.
+    pub fn script(&self, dir: &Path) -> std::path::PathBuf {
+        let quote = |text: &std::ffi::OsStr| format!("'{}'", text.to_string_lossy());
+        let mut line = quote(&self.program);
+        for argument in &self.arguments {
+            line.push(' ');
+            line.push_str(&quote(argument));
+        }
+        let scratch = if self.needs_scratch {
+            format!(
+                "KISS_SIM_TMP=$(mktemp -d '{}/sim.XXXXXX') || exit 2\nexport KISS_SIM_TMP\n",
+                dir.display()
+            )
+        } else {
+            String::new()
+        };
+        let text = format!(
+            "#!/bin/sh\nSP_BRIDGE_MNEMONIC='{}'\nexport SP_BRIDGE_MNEMONIC\n{scratch}exec {line} \"$@\"\n",
+            self.mnemonic
+        );
+        let path = dir.join(format!("{}-bridge.sh", self.name.to_lowercase()));
+        std::fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
     /// Hand the signer one request.
     pub fn run(&self, request: &[u8]) -> Answer {
         let scratch = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
