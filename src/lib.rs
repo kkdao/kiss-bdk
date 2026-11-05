@@ -27,6 +27,7 @@ pub mod spsend;
 pub mod spspend;
 pub mod spstore;
 pub mod spverify;
+pub mod transport;
 
 /// Split the two-path descriptor emitted by KISS (`/<0;1>/*`) into the
 /// external and internal descriptors expected by BDK.
