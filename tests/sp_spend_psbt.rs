@@ -290,6 +290,31 @@ fn refuses_a_sighash_all_signature_signed_over_another_message() {
     let error = spspend::verify_signatures(&psbt, &sp)
         .unwrap_err()
         .to_string();
+    assert!(error.contains("not signed by the key"), "{error}");
+}
+
+#[test]
+fn accepts_a_sighash_all_signature() {
+    let (spend_priv, _) = spend_keys();
+    let coins = coins(1, 100_000);
+    let (_, bytes) = spend_psbt(&coins, 50_000);
+    let signed = sign_with_sighash(&bytes, &spend_priv, TapSighashType::All);
+    let psbt = to_v0(&signed).unwrap();
+    let sp = spspend::sp_inputs(&psbt, &coins).unwrap();
+    spspend::verify_signatures(&psbt, &sp).unwrap();
+}
+
+#[test]
+fn refuses_a_sighash_that_leaves_outputs_open() {
+    let (spend_priv, _) = spend_keys();
+    let coins = coins(1, 100_000);
+    let (_, bytes) = spend_psbt(&coins, 50_000);
+    let signed = sign_with_sighash(&bytes, &spend_priv, TapSighashType::None);
+    let psbt = to_v0(&signed).unwrap();
+    let sp = spspend::sp_inputs(&psbt, &coins).unwrap();
+    let error = spspend::verify_signatures(&psbt, &sp)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("sighash"), "{error}");
 }
 
@@ -297,6 +322,12 @@ fn refuses_a_sighash_all_signature_signed_over_another_message() {
 /// BIP-341 key-path message, and write a 64-byte signature into
 /// `PSBT_IN_TAP_KEY_SIG`. Nothing else about the PSBT changes.
 fn sign_as_kiss(bytes: &[u8], spend_priv: &SecretKey) -> PsbtV2 {
+    sign_with_sighash(bytes, spend_priv, TapSighashType::Default)
+}
+
+/// As `sign_as_kiss`, with a chosen sighash type. A signer that also builds
+/// silent payment outputs may sign with an explicit SIGHASH_ALL (BIP-375).
+fn sign_with_sighash(bytes: &[u8], spend_priv: &SecretKey, sighash_type: TapSighashType) -> PsbtV2 {
     let secp = Secp256k1::new();
     let mut v2 = PsbtV2::deserialize(bytes).unwrap();
     let v0 = to_v0(&v2).unwrap();
@@ -323,18 +354,14 @@ fn sign_as_kiss(bytes: &[u8], spend_priv: &SecretKey) -> PsbtV2 {
 
     for (index, secret) in tweaked {
         let sighash = cache
-            .taproot_key_spend_signature_hash(
-                index,
-                &Prevouts::All(&prevouts),
-                TapSighashType::Default,
-            )
+            .taproot_key_spend_signature_hash(index, &Prevouts::All(&prevouts), sighash_type)
             .unwrap();
         let keypair = Keypair::from_secret_key(&secp, &secret);
         let signature =
             secp.sign_schnorr_no_aux_rand(&Message::from_digest(sighash.to_byte_array()), &keypair);
         v2.inputs[index].tap_key_sig = Some(taproot::Signature {
             signature,
-            sighash_type: TapSighashType::Default,
+            sighash_type,
         });
     }
     v2

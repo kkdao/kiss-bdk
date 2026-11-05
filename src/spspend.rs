@@ -385,23 +385,21 @@ pub fn verify_signatures(psbt: &Psbt, sp: &BTreeMap<usize, XOnlyPublicKey>) -> R
         let signature = psbt.inputs[*index]
             .tap_key_sig
             .with_context(|| format!("silent payment input {index} carries no signature"))?;
-        // 64 bytes means SIGHASH_DEFAULT. The signer appends a hash-type byte
-        // only when the PSBT asked for one, so 65 bytes back means a sighash
-        // field survived into the request and the message hashed here is not
-        // the message that was signed.
-        if signature.sighash_type != TapSighashType::Default {
+        // 64 bytes means SIGHASH_DEFAULT; 65 bytes ending in 0x01 is
+        // SIGHASH_ALL, which commits to the same transaction. A signer that
+        // also builds silent payment outputs (BIP-375 asks for SIGHASH_ALL)
+        // may use either. Anything narrower would let the transaction change
+        // after signing, so it is refused.
+        let sighash_type = signature.sighash_type;
+        if !matches!(sighash_type, TapSighashType::Default | TapSighashType::All) {
             bail!(
                 "silent payment input {index} was signed with sighash {:?}; \
-                 this coordinator only ever asks for the default",
-                signature.sighash_type
+                 only the default or All commit to the whole transaction",
+                sighash_type
             );
         }
         let sighash = cache
-            .taproot_key_spend_signature_hash(
-                *index,
-                &Prevouts::All(&prevouts),
-                TapSighashType::Default,
-            )
+            .taproot_key_spend_signature_hash(*index, &Prevouts::All(&prevouts), sighash_type)
             .with_context(|| format!("hashing silent payment input {index}"))?;
         secp.verify_schnorr(
             &signature.signature,
