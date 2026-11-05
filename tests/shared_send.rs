@@ -15,6 +15,11 @@
 #[path = "support/ref_signer.rs"]
 mod ref_signer;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+
+use bdk_wallet::Wallet;
 use bdk_wallet::bitcoin::hashes::Hash;
 use bdk_wallet::bitcoin::secp256k1::{Message as SecpMessage, PublicKey, Secp256k1, SecretKey};
 use bdk_wallet::bitcoin::sighash::{EcdsaSighashType, SighashCache};
@@ -24,9 +29,9 @@ use bdk_wallet::bitcoin::{
 };
 use bdk_wallet::coin_selection::LargestFirstCoinSelection;
 use bdk_wallet::test_utils::new_wallet_and_funding_update;
-use bdk_wallet::Wallet;
+use kiss_bdk::dirtransport::DirTransport;
 use kiss_bdk::shared::{self, Kind, Message, Newest, Pass, Received, Role, Session, Stage};
-use kiss_bdk::sharedflow::{self, Store};
+use kiss_bdk::sharedflow::{self, Flow, Progress, SignerLink, Store, Terms, Visit, WalletLink};
 use kiss_bdk::sp::{self, SilentPaymentAddress};
 use kiss_bdk::spreceive::ScanKeys;
 use kiss_bdk::spsend::{placeholder_script, serialize_v2};
@@ -1254,4 +1259,212 @@ fn says_where_a_shared_send_stands() {
         lines.contains("this wallet's signer goes next, to review and sign"),
         "{lines}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same send as the commands run it: session files and a channel folder
+
+/// A wallet as a [`Flow`] sees it: one funded BDK wallet, and a list that
+/// stands in for the network.
+struct TestWallet {
+    wallet: Wallet,
+    sent: Rc<RefCell<Vec<Transaction>>>,
+}
+
+impl WalletLink for TestWallet {
+    fn fund(
+        &mut self,
+        recipient: &SilentPaymentAddress,
+        sats: u64,
+        fee_rate: u64,
+    ) -> anyhow::Result<Psbt> {
+        Ok(half(&mut self.wallet, recipient, sats, fee_rate))
+    }
+
+    fn broadcast(&mut self, tx: &Transaction) -> anyhow::Result<()> {
+        self.sent.borrow_mut().push(tx.clone());
+        Ok(())
+    }
+}
+
+/// A reference signer behind the [`SignerLink`] a flow talks to, counting
+/// its visits.
+struct TestSigner {
+    signer: RefSigner,
+    visits: Vec<Pass>,
+}
+
+impl SignerLink for TestSigner {
+    fn sign(&mut self, request: &[u8], visit: &Visit) -> anyhow::Result<Vec<u8>> {
+        self.visits.push(visit.pass);
+        let outcome = self
+            .signer
+            .sign(request)
+            .map_err(|refusal| anyhow::anyhow!("the signer refused: {}", refusal.0))?;
+        Ok(outcome.bytes().to_vec())
+    }
+}
+
+/// Step one side until it has nothing more to do without the other side.
+fn run_until_idle(flow: &mut Flow<'_>) -> Option<String> {
+    for _ in 0..50 {
+        match flow.step(Duration::ZERO).unwrap() {
+            Progress::Moved => {}
+            Progress::Waiting => return None,
+            Progress::Done(txid) => return Some(txid),
+        }
+    }
+    panic!("a flow kept moving without ever waiting");
+}
+
+#[test]
+fn two_signers_pay_one_silent_payment_over_a_channel_folder() {
+    let payee = payee();
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let channel = tempfile::tempdir().unwrap();
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (store_a, store_b) = (
+        Store::in_wallet(dir_a.path()),
+        Store::in_wallet(dir_b.path()),
+    );
+
+    let mut signer_a = TestSigner {
+        signer: signer_a(),
+        visits: Vec::new(),
+    };
+    let mut signer_b = TestSigner {
+        signer: signer_b(),
+        visits: Vec::new(),
+    };
+    let me_a = signer_a.signer.fingerprint().to_string();
+    let me_b = signer_b.signer.fingerprint().to_string();
+    let mut wallet_a = TestWallet {
+        wallet: funded(&signer_a.signer.descriptor()),
+        sent: sent.clone(),
+    };
+    let mut wallet_b = TestWallet {
+        wallet: funded(&signer_b.signer.descriptor()),
+        sent: sent.clone(),
+    };
+    let mut channel_a = DirTransport::open(channel.path(), &me_a).unwrap();
+    let mut channel_b = DirTransport::open(channel.path(), &me_b).unwrap();
+
+    assert!(
+        sharedflow::begin(
+            &store_a,
+            &mut wallet_a,
+            &me_a,
+            &payee.address,
+            SATS,
+            FEE_RATE,
+            b"dir"
+        )
+        .unwrap()
+    );
+    // Running the same command again carries the same send on.
+    assert!(
+        !sharedflow::begin(
+            &store_a,
+            &mut wallet_a,
+            &me_a,
+            &payee.address,
+            SATS,
+            FEE_RATE,
+            b"dir"
+        )
+        .unwrap()
+    );
+
+    let mut said_a = Vec::new();
+    let mut said_b = Vec::new();
+    let mut say_a = |line: &str| said_a.push(line.to_string());
+    let mut say_b = |line: &str| said_b.push(line.to_string());
+    let mut flow_a = Flow {
+        store: &store_a,
+        me: me_a.clone(),
+        transport: &mut channel_a,
+        wallet: &mut wallet_a,
+        signer: &mut signer_a,
+        say: &mut say_a,
+        grace: Duration::ZERO,
+        terms: None,
+        waited: false,
+    };
+    let mut flow_b = Flow {
+        store: &store_b,
+        me: me_b.clone(),
+        transport: &mut channel_b,
+        wallet: &mut wallet_b,
+        signer: &mut signer_b,
+        say: &mut say_b,
+        grace: Duration::ZERO,
+        terms: Some(Terms {
+            to: Some(payee.address.clone()),
+            sats: Some(SATS),
+        }),
+        waited: false,
+    };
+
+    let mut done = (None, None);
+    for _ in 0..10 {
+        if done.0.is_none() {
+            done.0 = run_until_idle(&mut flow_a);
+        }
+        if done.1.is_none() {
+            done.1 = run_until_idle(&mut flow_b);
+        }
+        if done.0.is_some() && done.1.is_some() {
+            break;
+        }
+    }
+    drop((flow_a, flow_b));
+    let (Some(txid_a), Some(txid_b)) = done else {
+        panic!("the send did not finish: {said_a:?} {said_b:?}");
+    };
+    assert_eq!(txid_a, txid_b);
+
+    // Three signer visits in the order the contract gives, one broadcast.
+    assert_eq!(signer_b.visits, vec![Pass::ShareOnly, Pass::Sign]);
+    assert_eq!(signer_a.visits, vec![Pass::Sign]);
+    let sent = sent.borrow();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the transaction was broadcast more than once"
+    );
+    let tx = &sent[0];
+    assert_eq!(tx.compute_txid().to_string(), txid_a);
+    assert!(
+        said_b
+            .iter()
+            .any(|line| line.starts_with(&format!("broadcast: {txid_a}")))
+    );
+    assert!(
+        said_a
+            .iter()
+            .any(|line| line.contains("the other wallet broadcast the payment"))
+    );
+    assert!(
+        said_a
+            .iter()
+            .any(|line| line.starts_with("input 1 share proof OK")),
+        "{said_a:?}"
+    );
+
+    let state = store_b.load().unwrap().session.unwrap().state().unwrap();
+    let coins = prevouts(&state);
+    assert_signatures_verify(tx, &coins);
+    assert_fee_rate(tx, &coins, FEE_RATE);
+    let keys = private_keys(&state, &[&signer_a.signer, &signer_b.signer]);
+    assert_pays(tx, &coins, &keys, &payee, SATS);
+
+    // Both session files agree, and a restarted command has nothing to do.
+    for store in [&store_a, &store_b] {
+        let saved = store.load().unwrap();
+        assert!(saved.inbox.is_empty());
+        let session = saved.session.unwrap();
+        assert_eq!(session.stage, Stage::Done);
+        assert_eq!(session.txid.as_deref(), Some(txid_a.as_str()));
+        assert!(session.outbox.is_empty());
+    }
 }
