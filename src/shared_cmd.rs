@@ -407,6 +407,9 @@ fn drive(
         camera: signer.camera,
         animated: signer.animated,
         refusals: 0,
+        last_answer: None,
+        refused_answer: None,
+        last_request: Vec::new(),
     };
     let mut say = |line: &str| println!("{line}");
     let mut flow = Flow {
@@ -616,6 +619,13 @@ struct CameraSigner {
     camera: u32,
     animated: bool,
     refusals: u32,
+    /// The answer handed back last, and one that was refused: a QR still
+    /// in front of the webcam is read again at once, so the same refused
+    /// answer is skipped rather than counted as another try.
+    last_answer: Option<Vec<u8>>,
+    refused_answer: Option<Vec<u8>>,
+    /// The request the signer was last shown; a new one starts afresh.
+    last_request: Vec<u8>,
 }
 
 /// The webcam scan gave up because no complete QR came into view in time.
@@ -627,6 +637,11 @@ fn is_camera_timeout(error: &anyhow::Error) -> bool {
 
 impl SignerLink for CameraSigner {
     fn sign(&mut self, request: &[u8], visit: &Visit) -> Result<Vec<u8>> {
+        if self.last_request != request {
+            self.last_request = request.to_vec();
+            self.refused_answer = None;
+            self.refusals = 0;
+        }
         let near = self.wallet_dir.join(format!(
             "shared-{}-visit{}.psbt",
             visit.session, visit.number
@@ -638,8 +653,10 @@ impl SignerLink for CameraSigner {
         if let Ok(command) = std::env::var(TEST_SIGNER) {
             return test_signer(&command, &near);
         }
-        println!("On the signer: SIGN, then SCAN QR, and scan the QR opened on the computer.");
-        open_qr_image(&image);
+        if self.refused_answer.is_none() {
+            println!("On the signer: SIGN, then SCAN QR, and scan the QR opened on the computer.");
+            open_qr_image(&image);
+        }
         println!(
             "Then hold the signer's QR in front of camera {}...",
             self.camera
@@ -652,6 +669,13 @@ impl SignerLink for CameraSigner {
                 Err(error) if is_camera_timeout(&error) => {
                     println!("still waiting for the signer's QR...");
                 }
+                Ok(bytes) if self.refused_answer.as_deref() == Some(&bytes[..]) => {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                Ok(bytes) => {
+                    self.last_answer = Some(bytes.clone());
+                    return Ok(bytes);
+                }
                 other => return other,
             }
         }
@@ -659,6 +683,7 @@ impl SignerLink for CameraSigner {
 
     fn refused(&mut self, error: &anyhow::Error) -> bool {
         self.refusals += 1;
+        self.refused_answer = self.last_answer.take();
         eprintln!("the signer's answer was refused: {error:#}");
         if self.refusals < SIGNER_TRIES {
             eprintln!("scan the signer's QR again");
