@@ -118,7 +118,7 @@ fn message(text: &str) -> Message {
 
 /// Hand everything in `from`'s outbox to `to`, as a channel would.
 fn deliver(from: &mut Session, to: &mut Session) -> Vec<Received> {
-    let sent: Vec<String> = from.outbox.drain(..).collect();
+    let sent: Vec<String> = std::mem::take(&mut from.outbox);
     assert!(!sent.is_empty(), "nothing was waiting to be sent");
     sent.iter()
         .map(|text| to.receive(&message(text)).unwrap())

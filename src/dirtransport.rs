@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn sorts_by_time_and_keeps_a_senders_numbers_ascending() {
-        let mut entries = vec![
+        let mut entries = [
             parse_name(Path::new("/x/00000000000300-b-000001.msg")).unwrap(),
             parse_name(Path::new("/x/00000000000200-a-000002.msg")).unwrap(),
             parse_name(Path::new("/x/00000000000100-a-000001.msg")).unwrap(),
