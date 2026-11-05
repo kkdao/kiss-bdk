@@ -78,8 +78,3 @@ nokhwa-bindings-macos = "0.2.4"
 [dev-dependencies]
 serde_json = "1.0"
 bdk_wallet = { version = "3.1.0", features = ["test-utils"] }
-
-[patch.crates-io]
-# Patched: unlock() was a no-op, so a second kiss-bdk could not open the
-# webcam (see vendor/nokhwa-bindings-macos/src/lib.rs, kiss-bdk patch).
-nokhwa-bindings-macos = { path = "vendor/nokhwa-bindings-macos" }
