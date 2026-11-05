@@ -16,6 +16,7 @@ use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::miniscript::descriptor::{DescriptorPublicKey, checksum};
 
 pub mod blindbit;
+pub mod dirtransport;
 pub mod dleq;
 pub mod electrum;
 mod k_quirc;
@@ -27,6 +28,7 @@ pub mod spsend;
 pub mod spspend;
 pub mod spstore;
 pub mod spverify;
+pub mod transport;
 
 /// Split the two-path descriptor emitted by KISS (`/<0;1>/*`) into the
 /// external and internal descriptors expected by BDK.
