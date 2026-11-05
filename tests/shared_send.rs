@@ -37,6 +37,7 @@ use kiss_bdk::sharedflow::{self, Flow, Progress, SignerLink, Store, Terms, Visit
 use kiss_bdk::sp::{self, SilentPaymentAddress};
 use kiss_bdk::spreceive::ScanKeys;
 use kiss_bdk::spsend::{placeholder_script, serialize_v2};
+use kiss_bdk::transport::Transport;
 use kiss_bdk::{split_kiss_descriptor, spscan};
 use psbt_v2::v2::Psbt as PsbtV2;
 
@@ -1322,9 +1323,37 @@ fn run_until_idle(flow: &mut Flow<'_>) -> Option<String> {
 
 #[test]
 fn two_signers_pay_one_silent_payment_over_a_channel_folder() {
+    let channel = tempfile::tempdir().unwrap();
+    pay_over_a_channel(|me_a, me_b| {
+        (
+            Box::new(DirTransport::open(channel.path(), me_a).unwrap()),
+            Box::new(DirTransport::open(channel.path(), me_b).unwrap()),
+        )
+    });
+}
+
+/// The same send with the two wallets in a real Marmot group (MDK) on a
+/// nostr relay started inside the test.
+#[cfg(feature = "marmot")]
+#[test]
+fn two_signers_pay_one_silent_payment_over_marmot() {
+    use kiss_bdk::marmot::{LocalRelay, Marmot};
+    let relay = LocalRelay::start(0).unwrap();
+    let relays = vec![relay.url().to_string()];
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = Marmot::open(dir_a.path(), &relays).unwrap();
+    let mut b = Marmot::open(dir_b.path(), &relays).unwrap();
+    b.publish_key_package().unwrap();
+    a.invite(&b.npub()).unwrap();
+    assert_eq!(b.accept(Duration::from_secs(15)).unwrap(), Some(a.npub()));
+    pay_over_a_channel(|_, _| (Box::new(a), Box::new(b)));
+}
+
+type Channels = (Box<dyn Transport>, Box<dyn Transport>);
+
+fn pay_over_a_channel(make: impl FnOnce(&str, &str) -> Channels) {
     let payee = payee();
     let sent = Rc::new(RefCell::new(Vec::new()));
-    let channel = tempfile::tempdir().unwrap();
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (store_a, store_b) = (
         Store::in_wallet(dir_a.path()),
@@ -1349,8 +1378,7 @@ fn two_signers_pay_one_silent_payment_over_a_channel_folder() {
         wallet: funded(&signer_b.signer.descriptor()),
         sent: sent.clone(),
     };
-    let mut channel_a = DirTransport::open(channel.path(), &me_a).unwrap();
-    let mut channel_b = DirTransport::open(channel.path(), &me_b).unwrap();
+    let (mut channel_a, mut channel_b) = make(&me_a, &me_b);
 
     assert!(
         sharedflow::begin(
@@ -1385,7 +1413,7 @@ fn two_signers_pay_one_silent_payment_over_a_channel_folder() {
     let mut flow_a = Flow {
         store: &store_a,
         me: me_a.clone(),
-        transport: &mut channel_a,
+        transport: &mut *channel_a,
         wallet: &mut wallet_a,
         signer: &mut signer_a,
         say: &mut say_a,
@@ -1396,7 +1424,7 @@ fn two_signers_pay_one_silent_payment_over_a_channel_folder() {
     let mut flow_b = Flow {
         store: &store_b,
         me: me_b.clone(),
-        transport: &mut channel_b,
+        transport: &mut *channel_b,
         wallet: &mut wallet_b,
         signer: &mut signer_b,
         say: &mut say_b,
@@ -1408,8 +1436,10 @@ fn two_signers_pay_one_silent_payment_over_a_channel_folder() {
         waited: false,
     };
 
+    // A relay delivers a moment later than a folder, so keep going for a
+    // while; the folder case finishes in a few rounds.
     let mut done = (None, None);
-    for _ in 0..10 {
+    for _ in 0..600 {
         if done.0.is_none() {
             done.0 = run_until_idle(&mut flow_a);
         }
@@ -1419,6 +1449,7 @@ fn two_signers_pay_one_silent_payment_over_a_channel_folder() {
         if done.0.is_some() && done.1.is_some() {
             break;
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
     drop((flow_a, flow_b));
     let (Some(txid_a), Some(txid_b)) = done else {
