@@ -9,6 +9,8 @@ description = "Experimental test-network coordinator for the KISS offline signin
 license = "MIT"
 repository = "https://github.com/kkdao/kiss-bdk"
 readme = "README.md"
+# `cargo run` keeps meaning the coordinator now that a second binary exists.
+default-run = "kiss-bdk"
 
 [dependencies]
 anyhow = "1.0"
@@ -30,6 +32,42 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.26"
 ur = "0.5.0"
+# Marmot transport (MLS group messaging over nostr). Optional, and only built
+# with `--features marmot`, so the default build does not change. The nostr
+# crates are the 0.44 line because that is the one MDK 0.8 is built on.
+# mdk-sqlite-storage cannot be used: it needs rusqlite 0.37 and bdk_wallet
+# links rusqlite 0.31, and only one sqlite may be linked. The MLS state is
+# kept in the in-memory stores and saved to a file instead.
+mdk-core = { version = "0.8.0", optional = true }
+mdk-memory-storage = { version = "0.8.0", optional = true }
+mdk-storage-traits = { version = "0.8.0", optional = true }
+nostr-relay-builder = { version = "0.44", optional = true }
+nostr-sdk = { version = "0.44", optional = true, features = ["nip59"] }
+openmls_memory_storage = { version = "0.5", optional = true }
+openmls_traits = { version = "0.5", optional = true }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "sync", "time"] }
+
+[features]
+marmot = [
+    "dep:mdk-core",
+    "dep:mdk-memory-storage",
+    "dep:mdk-storage-traits",
+    "dep:nostr-relay-builder",
+    "dep:nostr-sdk",
+    "dep:openmls_memory_storage",
+    "dep:openmls_traits",
+    "dep:tokio",
+]
+
+[[bin]]
+name = "kiss-marmot"
+path = "src/bin/kiss-marmot.rs"
+required-features = ["marmot"]
+
+[[test]]
+name = "marmot_local"
+path = "tests/marmot_local.rs"
+required-features = ["marmot"]
 
 [build-dependencies]
 cc = "1.3"
