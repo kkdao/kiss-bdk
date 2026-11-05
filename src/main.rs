@@ -1387,6 +1387,7 @@ enum QrStyle {
     Animated,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_psbt(
     wallet_dir: &Path,
     destination: &str,
