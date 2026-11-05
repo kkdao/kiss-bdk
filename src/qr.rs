@@ -122,6 +122,63 @@ fn ur_frames(cbor: &[u8], fragment: usize) -> Result<Vec<QrCode>> {
     Ok(frames)
 }
 
+/// The same frames as [`render_psbt_bytes_animated_gif`], as a page that plays
+/// them. A browser scales a GIF up smoothly for a high density screen, which
+/// greys every module edge, and Krux's low resolution camera then reads
+/// nothing; the page draws each frame with hard edges instead, the way a
+/// picture viewer shows it, and advances by itself.
+pub fn render_psbt_bytes_animated_html(psbt: &[u8]) -> Result<String> {
+    use base64::Engine;
+    if psbt.len() > MAX_PSBT_BYTES {
+        bail!(
+            "PSBT is {} bytes; KISS accepts at most {MAX_PSBT_BYTES}",
+            psbt.len()
+        );
+    }
+    let cbor = cbor_byte_string(psbt);
+    let mut fragment = UR_FRAGMENT_START;
+    let frames = loop {
+        match ur_frames(&cbor, fragment) {
+            Ok(frames) => break frames,
+            Err(_) if fragment > 16 => fragment /= 2,
+            Err(error) => return Err(error),
+        }
+    };
+    let mut sources = Vec::with_capacity(frames.len());
+    for code in &frames {
+        let image = code
+            .render::<Luma<u8>>()
+            .quiet_zone(true)
+            .module_dimensions(1, 1)
+            .build();
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                ColorType::L8.into(),
+            )
+            .context("writing a QR frame")?;
+        sources.push(format!(
+            "\"data:image/png;base64,{}\"",
+            base64::engine::general_purpose::STANDARD.encode(png)
+        ));
+    }
+    Ok(format!(
+        "<!doctype html><meta charset=utf-8><title>QR for the signer</title>\
+<style>html,body{{margin:0;height:100%;background:#fff}}\
+body{{display:flex;align-items:center;justify-content:center}}\
+img{{height:92vh;width:92vh;image-rendering:pixelated;image-rendering:crisp-edges}}\
+p{{position:fixed;bottom:4px;left:8px;font:14px sans-serif;color:#888;margin:0}}</style>\
+<img id=q alt=QR><p id=n></p><script>\
+const f=[{}];let i=0;const q=document.getElementById('q'),n=document.getElementById('n');\
+function s(){{q.src=f[i];n.textContent=(i+1)+'/'+f.length;i=(i+1)%f.length}}\
+s();setInterval(s,{UR_FRAME_DELAY_MS});</script>",
+        sources.join(",")
+    ))
+}
+
 /// One looping GIF, so opening the file is all it takes to show the sequence.
 fn encode_gif(frames: &[QrCode]) -> Result<Vec<u8>> {
     let mut gif = Vec::new();

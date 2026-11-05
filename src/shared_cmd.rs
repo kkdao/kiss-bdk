@@ -16,7 +16,9 @@ use bdk_wallet::bitcoin::{Amount, FeeRate, Psbt, Transaction};
 use bdk_wallet::coin_selection::LargestFirstCoinSelection;
 use clap::Subcommand;
 use kiss_bdk::dirtransport::DirTransport;
-use kiss_bdk::qr::{render_psbt_bytes_animated_gif, render_psbt_bytes_png, scan_signed_psbt_bytes};
+use kiss_bdk::qr::{
+    render_psbt_bytes_animated_html, render_psbt_bytes_png, scan_signed_psbt_bytes,
+};
 use kiss_bdk::shared::{self, Message, Pass, Received, Role, Session, Stage};
 use kiss_bdk::sharedflow::{
     self, DEFAULT_GRACE, Flow, Progress, SignerLink, Store, Terms, Visit, WalletLink,
@@ -591,8 +593,8 @@ fn show_qr(request: &[u8], near: &Path, animated: bool) -> Result<PathBuf> {
     let (path, bytes) = match render_psbt_bytes_png(request) {
         Ok(png) if !animated => (near.with_file_name(format!("{stem}-qr.png")), png),
         _ => (
-            near.with_file_name(format!("{stem}-qr.gif")),
-            render_psbt_bytes_animated_gif(request)?,
+            near.with_file_name(format!("{stem}-qr.html")),
+            render_psbt_bytes_animated_html(request)?.into_bytes(),
         ),
     };
     fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;

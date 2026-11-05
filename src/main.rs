@@ -1760,7 +1760,9 @@ fn open_qr_image(path: &Path) {
     // still pages to click through, which no signer camera can read. Safari
     // plays it; the default app is the fallback.
     #[cfg(target_os = "macos")]
-    let animated = path.extension().is_some_and(|ext| ext == "gif");
+    let animated = path
+        .extension()
+        .is_some_and(|ext| ext == "gif" || ext == "html");
     #[cfg(target_os = "macos")]
     if animated
         && ProcessCommand::new("open")
