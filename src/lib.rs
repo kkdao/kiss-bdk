@@ -19,6 +19,8 @@ pub mod blindbit;
 pub mod dleq;
 pub mod electrum;
 mod k_quirc;
+#[cfg(feature = "marmot")]
+pub mod marmot;
 pub mod qr;
 pub mod sp;
 pub mod spreceive;
