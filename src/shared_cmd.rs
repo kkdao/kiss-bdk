@@ -618,6 +618,13 @@ struct CameraSigner {
     refusals: u32,
 }
 
+/// The webcam scan gave up because no complete QR came into view in time.
+fn is_camera_timeout(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .starts_with("no complete QR was scanned within")
+}
+
 impl SignerLink for CameraSigner {
     fn sign(&mut self, request: &[u8], visit: &Visit) -> Result<Vec<u8>> {
         let near = self.wallet_dir.join(format!(
@@ -637,7 +644,17 @@ impl SignerLink for CameraSigner {
             "Then hold the signer's QR in front of camera {}...",
             self.camera
         );
-        scan_signed_psbt_bytes(self.camera)
+        // Reading the request, reviewing it and confirming on the signer can
+        // take longer than one webcam timeout, so keep waiting for the
+        // answer instead of ending the command.
+        loop {
+            match scan_signed_psbt_bytes(self.camera) {
+                Err(error) if is_camera_timeout(&error) => {
+                    println!("still waiting for the signer's QR...");
+                }
+                other => return other,
+            }
+        }
     }
 
     fn refused(&mut self, error: &anyhow::Error) -> bool {
@@ -700,5 +717,19 @@ impl WalletLink for BdkWallet {
             return Ok(());
         }
         self.esplora().broadcast(tx).context("broadcast failed")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_camera_timeout;
+
+    #[test]
+    fn a_webcam_timeout_is_told_apart_from_a_bad_answer() {
+        // The text src/qr.rs scan_camera gives up with.
+        let timeout = anyhow::anyhow!("no complete QR was scanned within 120 seconds");
+        assert!(is_camera_timeout(&timeout));
+        let refused = anyhow::anyhow!("camera permission denied");
+        assert!(!is_camera_timeout(&refused));
     }
 }
