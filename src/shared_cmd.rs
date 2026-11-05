@@ -578,6 +578,38 @@ fn show_qr(request: &[u8], near: &Path, animated: bool) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Test only: a desktop signer bridge (contract section 6) to run in place
+/// of the QR and the webcam, as a command line split on spaces.
+const TEST_SIGNER: &str = "KISS_BDK_TEST_SIGNER";
+/// Test only: when set, the long running commands print the finished
+/// transaction instead of sending it.
+const TEST_NO_BROADCAST: &str = "KISS_BDK_TEST_NO_BROADCAST";
+
+/// Run the bridge in `command` on the request file `request`, the way the
+/// tests reach the real signing code without a device.
+fn test_signer(command: &str, request: &Path) -> Result<Vec<u8>> {
+    let response = request.with_extension("answer.psbt");
+    // A run stopped after the bridge answered leaves this behind, and the
+    // bridge refuses to write over it.
+    if response.exists() {
+        fs::remove_file(&response).with_context(|| format!("removing {}", response.display()))?;
+    }
+    let mut words = command.split(' ').filter(|word| !word.is_empty());
+    let program = words
+        .next()
+        .with_context(|| format!("{TEST_SIGNER} is empty"))?;
+    let status = std::process::Command::new(program)
+        .args(words)
+        .arg(request)
+        .arg(&response)
+        .status()
+        .with_context(|| format!("running {TEST_SIGNER} {command:?}"))?;
+    if !status.success() {
+        bail!("{TEST_SIGNER} {command:?} failed: {status}");
+    }
+    fs::read(&response).with_context(|| format!("reading {}", response.display()))
+}
+
 /// This wallet's signer, reached by a QR on screen and the webcam.
 struct CameraSigner {
     wallet_dir: PathBuf,
@@ -596,6 +628,9 @@ impl SignerLink for CameraSigner {
         let image = show_qr(request, &near, self.animated)?;
         println!("your signer's turn (visit {})", visit.number);
         println!("{}", pass_text(visit.pass));
+        if let Ok(command) = std::env::var(TEST_SIGNER) {
+            return test_signer(&command, &near);
+        }
         println!("On the signer: SIGN, then SCAN QR, and scan the QR opened on the computer.");
         open_qr_image(&image);
         println!(
@@ -659,6 +694,11 @@ impl WalletLink for BdkWallet {
     }
 
     fn broadcast(&mut self, tx: &Transaction) -> Result<()> {
+        if std::env::var_os(TEST_NO_BROADCAST).is_some() {
+            println!("{}", serialize_hex(tx));
+            println!("dry run: {} was not sent", tx.compute_txid());
+            return Ok(());
+        }
         self.esplora().broadcast(tx).context("broadcast failed")
     }
 }
