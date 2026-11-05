@@ -1639,3 +1639,148 @@ fn two_signers_pay_one_silent_payment_through_the_file_steps() {
     let keys = private_keys(&state, &[&signer_a, &signer_b]);
     assert_pays(&tx, &coins, &keys, &payee, SATS);
 }
+
+// ---------------------------------------------------------------------------
+// The BIP-375 test vectors
+
+/// A vector's PSBT, with every P2WPKH coin's script made to pay the key in
+/// its BIP-32 derivation.
+///
+/// The vectors' P2WPKH scripts are placeholders that do not hash to the key
+/// beside them, and section 2 of the contract refuses exactly that. The
+/// script takes no part in the share maths (the input hash uses outpoints
+/// and keys), so binding it leaves what each vector tests intact.
+fn bound_vector(text: &str) -> anyhow::Result<PsbtV2> {
+    let mut psbt = shared::decode(text)?;
+    for input in &mut psbt.inputs {
+        let key = input.bip32_derivations.keys().next().copied();
+        if let (Some(utxo), Some(key)) = (input.witness_utxo.as_mut(), key)
+            && utxo.script_pubkey.is_p2wpkh()
+        {
+            utxo.script_pubkey =
+                ScriptBuf::new_p2wpkh(&CompressedPublicKey(key.inner).wpubkey_hash());
+        }
+    }
+    Ok(psbt)
+}
+
+/// What the coordinator's PSBT check says about each vector: `Ok(true)` when
+/// every share is there and checks out, `Ok(false)` when some are still
+/// missing, or the error.
+fn audit_vector(case: &serde_json::Value) -> Result<bool, String> {
+    bound_vector(case["psbt"].as_str().unwrap())
+        .and_then(|psbt| shared::audit(&psbt))
+        .map(|shares| shares.complete())
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[test]
+fn agrees_with_the_bip375_vectors_it_can_express() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/bip375-vectors.json")).unwrap();
+    let valid = fixture["valid"].as_array().unwrap();
+    let invalid = fixture["invalid"].as_array().unwrap();
+
+    // Per-input shares, every one proven, every script matching.
+    for index in [3, 7, 8, 13, 14, 15] {
+        assert_eq!(audit_vector(&valid[index]), Ok(true), "valid {index}");
+    }
+    // In progress: shares still missing and no script yet.
+    for index in [16, 17, 18] {
+        assert_eq!(audit_vector(&valid[index]), Ok(false), "valid {index}");
+    }
+    // Valid in BIP-375 but outside a version 1 shared send, which refuses a
+    // global share and any coin that is not P2WPKH or P2TR key path.
+    for (index, reason) in [
+        (0, "neither P2WPKH nor P2TR"),
+        (1, "no witness UTXO"),
+        (2, "global ECDH share"),
+        (4, "global ECDH share"),
+        (5, "global ECDH share"),
+        (6, "global ECDH share"),
+        (10, "no witness UTXO"),
+        (11, "global ECDH share"),
+        (12, "only be spent through a script"),
+        (19, "neither P2WPKH nor P2TR"),
+    ] {
+        let error = audit_vector(&valid[index]).unwrap_err();
+        assert!(error.contains(reason), "valid {index}: {error}");
+    }
+    // Two labels of one address: the vector gives k in output order, while
+    // sorting the labelled spend keys gives the other order. A shared send
+    // pays one unlabelled address, so this stays a known difference.
+    let error = audit_vector(&valid[9]).unwrap_err();
+    assert!(
+        error.contains("not the one the shares derive"),
+        "valid 9: {error}"
+    );
+
+    for (index, reason) in [
+        (0, "not a valid PSBTv2"),
+        (1, "not a valid PSBTv2"),
+        (2, "not a valid PSBTv2"),
+        (3, "not a valid PSBTv2"),
+        (4, "not a valid PSBTv2"),
+        (5, "open to changes"),
+        (6, "not a valid PSBTv2"),
+        (7, "no witness UTXO"),
+        (8, "input 0 has no ECDH share for its scan key"),
+        (9, "not a valid PSBTv2"),
+        (10, "not a valid PSBTv2"),
+        (
+            11,
+            "input 0 (signer 00000080): the ECDH share does not match its DLEQ proof",
+        ),
+        (12, "global ECDH share"),
+        (13, "no BIP-32 derivation key"),
+        (14, "output 1 has a script, but input 0 has no ECDH share"),
+        (15, "output 1 has a script, but input 1 has no ECDH share"),
+        (16, "output 0 has a script, but input 1 has no ECDH share"),
+        (17, "neither P2WPKH nor P2TR"),
+        (18, "sighash type 2"),
+        (19, "only be spent through a script"),
+        (20, "output 0 does not pay the silent payment address"),
+        (21, "output 0 does not pay the silent payment address"),
+        (22, "output 1 does not pay the silent payment address"),
+    ] {
+        let error = audit_vector(&invalid[index]).unwrap_err();
+        assert!(error.contains(reason), "invalid {index}: {error}");
+    }
+    assert_eq!(valid.len(), 20);
+    assert_eq!(invalid.len(), 23);
+}
+
+/// The reference signer's GenerateProof gives the BIP-374 vectors' proofs,
+/// so the coordinator's checks are tested against proofs made the BIP's way.
+#[test]
+fn the_reference_signer_makes_the_bip374_proofs() {
+    use bdk_wallet::bitcoin::hex::FromHex;
+
+    let hex = |text: &str| Vec::<u8>::from_hex(text).unwrap();
+    let rows = include_str!("fixtures/bip374-generate-proof.csv");
+    let mut made = 0;
+    for row in rows.lines().skip(1) {
+        let field: Vec<&str> = row.split(',').collect();
+        let (g, a, b, r, m, proof, comment) = (
+            field[1], field[2], field[3], field[4], field[5], field[6], field[7],
+        );
+        let key = SecretKey::from_slice(&hex(a));
+        // The point at infinity is written as a word, not as hex.
+        let scan = Vec::<u8>::from_hex(b)
+            .ok()
+            .and_then(|bytes| PublicKey::from_slice(&bytes).ok());
+        if comment.starts_with("Failure") {
+            assert!(key.is_err() || scan.is_none(), "{comment}");
+            continue;
+        }
+        let g = PublicKey::from_slice(&hex(g)).unwrap();
+        let r: [u8; 32] = hex(r).try_into().unwrap();
+        let m: Option<[u8; 32]> = (!m.is_empty()).then(|| hex(m).try_into().unwrap());
+        let made_proof =
+            ref_signer::generate_proof(&key.unwrap(), &scan.unwrap(), &r, Some(&g), m.as_ref())
+                .unwrap();
+        assert_eq!(made_proof.to_vec(), hex(proof), "{comment}");
+        made += 1;
+    }
+    assert_eq!(made, 8);
+}
