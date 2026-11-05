@@ -12,6 +12,8 @@
 //! desktop bridges instead; they are `#[ignore]`d because they need those
 //! programs, named in `KISS_INTEROP_SIGNER` and `KRUX_INTEROP_SIGNER`.
 
+#[path = "support/bridge.rs"]
+mod bridge;
 #[path = "support/ref_signer.rs"]
 mod ref_signer;
 
@@ -38,6 +40,7 @@ use kiss_bdk::spsend::{placeholder_script, serialize_v2};
 use kiss_bdk::{split_kiss_descriptor, spscan};
 use psbt_v2::v2::Psbt as PsbtV2;
 
+use bridge::Bridge;
 use ref_signer::{Outcome, RefSigner};
 
 const SATS: u64 = 10_001;
@@ -1783,4 +1786,213 @@ fn the_reference_signer_makes_the_bip374_proofs() {
         made += 1;
     }
     assert_eq!(made, 8);
+}
+
+// ---------------------------------------------------------------------------
+// The two real signers, through their desktop bridges (section 6)
+//
+// Run with KISS_INTEROP_SIGNER (the KISS bridge binary) and
+// KRUX_INTEROP_SIGNER (the Krux bridge command line) set:
+//
+//     cargo test --test shared_send real_signers -- --ignored
+
+/// A wallet of one bridge's descriptor, holding one coin, and its fingerprint.
+fn bridge_wallet(bridge: &Bridge) -> (Wallet, String) {
+    let descriptor = bridge::kiss_form(&bridge.descriptor());
+    let me = kiss_bdk::kiss_fingerprint(&descriptor).unwrap().to_string();
+    (funded(&descriptor), me)
+}
+
+/// Proposal and join between the wallets of two bridges.
+fn joined_bridges(payee: &Payee, start: &Bridge, join: &Bridge) -> (Session, Session) {
+    let (mut wallet_a, me_a) = bridge_wallet(start);
+    let (mut wallet_b, me_b) = bridge_wallet(join);
+    assert_ne!(me_a, me_b, "the two bridges must run different seeds");
+    let half_a = half(
+        &mut wallet_a,
+        &payee.parsed,
+        shared::share_of(SATS, Role::Start),
+        FEE_RATE,
+    );
+    let mut a = Session::propose(
+        &me_a,
+        &shared::session_id(b"real signers"),
+        &half_a,
+        &payee.address,
+        SATS,
+        FEE_RATE,
+    )
+    .unwrap();
+    let proposal = shared::read_proposal(&message(&a.outbox.remove(0)), &me_b).unwrap();
+    let half_b = half(
+        &mut wallet_b,
+        &proposal.recipient,
+        shared::share_of(proposal.sats, Role::Join),
+        proposal.fee_rate,
+    );
+    let b = Session::join(&me_b, &proposal, &half_b).unwrap();
+    (a, b)
+}
+
+/// One trip to a real signer: it must succeed, say SHARE on a share only
+/// pass and SIGNED on a signing pass, and its answer must pass every check.
+fn bridge_visit(session: &mut Session, bridge: &Bridge) -> Vec<String> {
+    let pass = session.pass().unwrap();
+    let request = session.request().unwrap();
+    let answer = bridge.run(&request);
+    assert_eq!(answer.code, Some(0), "{} bridge: {answer:?}", bridge.name);
+    let expected = match pass {
+        Pass::ShareOnly => "SHARE",
+        Pass::Sign => "SIGNED",
+    };
+    assert_eq!(
+        answer.last_line, expected,
+        "{} bridge: {answer:?}",
+        bridge.name
+    );
+    let response = answer
+        .response
+        .expect("a successful bridge writes its response");
+    session
+        .respond(&response)
+        .unwrap_or_else(|error| panic!("{} answer refused: {error:#}", bridge.name))
+}
+
+/// A whole send: `join`'s signer, then `start`'s, then `join`'s again.
+fn real_send(start: Bridge, join: Bridge) {
+    let payee = payee();
+    let (mut a, mut b) = joined_bridges(&payee, &start, &join);
+
+    assert_eq!(b.pass().unwrap(), Pass::ShareOnly);
+    let lines = bridge_visit(&mut b, &join);
+    assert!(
+        lines.iter().any(|line| line.contains("share proof OK")),
+        "{lines:?}"
+    );
+    deliver(&mut b, &mut a);
+
+    assert_eq!(a.pass().unwrap(), Pass::Sign);
+    let lines = bridge_visit(&mut a, &start);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("script derived from 2 shares")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("signature OK")),
+        "{lines:?}"
+    );
+    deliver(&mut a, &mut b);
+
+    assert_eq!(b.pass().unwrap(), Pass::Sign);
+    let lines = bridge_visit(&mut b, &join);
+    assert!(
+        lines.iter().any(|line| line.contains("signature OK")),
+        "{lines:?}"
+    );
+
+    assert!(b.ready().unwrap());
+    let state = b.state().unwrap();
+    let tx = b.finalize().unwrap();
+    let coins = prevouts(&state);
+    assert_signatures_verify(&tx, &coins);
+    assert_fee_rate(&tx, &coins, FEE_RATE);
+    assert_received(&tx, &state, &payee, SATS);
+}
+
+/// The payment is the one the shares derive, worked out here with the
+/// reference code rather than the coordinator's, and the payee's own BIP-352
+/// scan, which uses its scan private key and no share, finds it.
+fn assert_received(tx: &Transaction, state: &PsbtV2, payee: &Payee, sats: u64) {
+    let scan = CompressedPublicKey(payee.parsed.scan);
+    let keys: Vec<PublicKey> = state
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| shared::input_key(index, input).unwrap())
+        .collect();
+    let shares: Vec<PublicKey> = state
+        .inputs
+        .iter()
+        .map(|input| input.sp_ecdh_shares[&scan].0)
+        .collect();
+    let outpoints: Vec<OutPoint> = tx.input.iter().map(|input| input.previous_output).collect();
+    let expected =
+        ref_signer::script_from_shares(&keys, &shares, &outpoints, &payee.parsed.spend, 0);
+    let paying: Vec<&TxOut> = tx
+        .output
+        .iter()
+        .filter(|out| out.script_pubkey == expected)
+        .collect();
+    assert_eq!(
+        paying.len(),
+        1,
+        "no output carries the script the shares derive"
+    );
+    assert_eq!(paying[0].value, Amount::from_sat(sats));
+
+    let coins = prevouts(state);
+    let found = spscan::scan_transaction(&spscan::scanner(&payee.keys), tx, &coins, 100).unwrap();
+    assert_eq!(found.len(), 1, "the payee's scan does not find the payment");
+    assert_eq!(found[0].out.script_pubkey, expected);
+    assert_eq!(found[0].out.amount, Amount::from_sat(sats));
+}
+
+/// The signer that goes second sees the other signer's share with one byte
+/// changed, its proof untouched. It must refuse (exit code 3) and write no
+/// response.
+fn real_refuses_a_corrupted_foreign_share(start: Bridge, join: Bridge) {
+    let payee = payee();
+    let (mut a, mut b) = joined_bridges(&payee, &start, &join);
+    bridge_visit(&mut b, &join);
+    deliver(&mut b, &mut a);
+
+    let request = a.request().unwrap();
+    let state = PsbtV2::deserialize(&request).unwrap();
+    let foreign = state
+        .inputs
+        .iter()
+        .position(|input| !input.sp_ecdh_shares.is_empty())
+        .expect("the first signer's share is in the request");
+    let tampered = edited(&request, |psbt| {
+        let (scan, share) = psbt.inputs[foreign].sp_ecdh_shares.iter().next().unwrap();
+        let (scan, share) = (*scan, flipped_share(share));
+        psbt.inputs[foreign].sp_ecdh_shares.insert(scan, share);
+    });
+    let answer = start.run(&tampered);
+    assert_eq!(answer.code, Some(3), "{} bridge: {answer:?}", start.name);
+    assert!(
+        answer.response.is_none(),
+        "a refusing bridge wrote a response"
+    );
+    assert!(
+        !answer.stderr.trim().is_empty(),
+        "a refusal gives its reason"
+    );
+}
+
+#[test]
+#[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
+fn real_signers_krux_then_kiss_then_krux() {
+    // KISS's wallet starts, so Krux's signer goes first and last.
+    real_send(Bridge::kiss(), Bridge::krux());
+}
+
+#[test]
+#[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
+fn real_signers_kiss_then_krux_then_kiss() {
+    real_send(Bridge::krux(), Bridge::kiss());
+}
+
+#[test]
+#[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
+fn real_signers_kiss_refuses_a_corrupted_krux_share() {
+    real_refuses_a_corrupted_foreign_share(Bridge::kiss(), Bridge::krux());
+}
+
+#[test]
+#[ignore = "needs KISS_INTEROP_SIGNER and KRUX_INTEROP_SIGNER"]
+fn real_signers_krux_refuses_a_corrupted_kiss_share() {
+    real_refuses_a_corrupted_foreign_share(Bridge::krux(), Bridge::kiss());
 }
