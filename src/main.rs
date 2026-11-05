@@ -11,7 +11,7 @@ use bdk_esplora::esplora_client::{BlockingClient, Builder};
 use bdk_wallet::bitcoin::address::NetworkUnchecked;
 use bdk_wallet::bitcoin::bip32::KeySource;
 use bdk_wallet::bitcoin::secp256k1::PublicKey;
-use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt, Sequence, constants};
+use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt, Sequence, absolute, constants};
 use bdk_wallet::coin_selection::LargestFirstCoinSelection;
 use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
@@ -264,6 +264,13 @@ enum Command {
         /// choice rather than a hint.
         #[arg(long)]
         from_sp: bool,
+
+        /// nLockTime as a block height. Defaults to the current tip, which
+        /// BDK sets so the transaction looks like any other wallet's (anti fee
+        /// sniping). 0 leaves it unset, for a signer that reads a test
+        /// network's height as a mainnet date and fails on it.
+        #[arg(long)]
+        locktime: Option<u32>,
     },
 
     /// Scan KISS's animated signed-PSBT QR with the computer webcam.
@@ -400,6 +407,7 @@ fn main() -> Result<()> {
             qr,
             animated,
             from_sp,
+            locktime,
         } => create_psbt(
             &cli.wallet_dir,
             &to,
@@ -412,6 +420,7 @@ fn main() -> Result<()> {
                 (true, true) => Some(QrStyle::Animated),
             },
             from_sp,
+            locktime,
         ),
         Command::Scan {
             out,
@@ -1325,6 +1334,7 @@ fn build_transaction<Cs: bdk_wallet::coin_selection::CoinSelectionAlgorithm>(
     recipient: &Destination,
     sats: u64,
     fee_rate: FeeRate,
+    locktime: Option<u32>,
 ) -> Result<Psbt> {
     if let Some(sp) = sp_spend {
         for coin in &sp.coins {
@@ -1360,6 +1370,11 @@ fn build_transaction<Cs: bdk_wallet::coin_selection::CoinSelectionAlgorithm>(
     builder
         .add_recipient(recipient.script_pubkey(), Amount::from_sat(sats))
         .fee_rate(fee_rate);
+    if let Some(height) = locktime {
+        let height = absolute::Height::from_consensus(height)
+            .context("--locktime must be a block height, below 500000000")?;
+        builder.nlocktime(absolute::LockTime::Blocks(height));
+    }
     builder.finish().context("building transaction")
 }
 
@@ -1380,6 +1395,7 @@ fn create_psbt(
     out: &Path,
     qr: Option<QrStyle>,
     from_sp: bool,
+    locktime: Option<u32>,
 ) -> Result<()> {
     if sats == 0 {
         bail!("--sats must be greater than zero");
@@ -1454,6 +1470,7 @@ fn create_psbt(
             &recipient,
             sats,
             fee_rate,
+            locktime,
         )?
     } else {
         build_transaction(
@@ -1463,6 +1480,7 @@ fn create_psbt(
             &recipient,
             sats,
             fee_rate,
+            locktime,
         )?
     };
     // A silent payment leaves as a PSBTv2: only the signer can derive the
