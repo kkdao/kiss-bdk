@@ -161,7 +161,7 @@ pub fn run(wallet_dir: &Path, command: SharedCommand) -> Result<()> {
             signer,
         } => {
             channel_folder(&channel)?;
-            let mut transport = open_channel(&channel, &me(wallet_dir)?)?;
+            let mut transport = open_channel(&channel, &me(wallet_dir)?, wallet_dir)?;
             let wallet = &mut BdkWallet::open(wallet_dir)?;
             let fee_rate = fee_rate_or_estimate(&wallet.config, fee_rate)?;
             check_recipient(&to, wallet.chain)?;
@@ -202,7 +202,7 @@ pub fn run(wallet_dir: &Path, command: SharedCommand) -> Result<()> {
                 );
             }
             store.retire(&mut saved)?;
-            let mut transport = open_channel(&channel, &me)?;
+            let mut transport = open_channel(&channel, &me, wallet_dir)?;
             let wallet = &mut BdkWallet::open(wallet_dir)?;
             if let Some(to) = &to {
                 check_recipient(to, wallet.chain)?;
@@ -438,23 +438,48 @@ fn drive(
     }
 }
 
-/// `--channel`: which transport carries the messages. Checked before anything
-/// else is touched, so a channel that cannot work fails at once.
-fn channel_folder(channel: &str) -> Result<&str> {
+/// `--channel`: which transport carries the messages.
+enum Channel<'a> {
+    /// A folder both wallets can write to.
+    Dir(&'a str),
+    /// The Marmot group set up beforehand with `kiss-marmot`.
+    Marmot,
+}
+
+/// Checked before anything else is touched, so a channel that cannot work
+/// fails at once.
+fn channel_folder(channel: &str) -> Result<Channel<'_>> {
     if let Some(path) = channel.strip_prefix("dir:") {
         if path.is_empty() {
             bail!("--channel dir: needs a folder, for example dir:/path/to/folder");
         }
-        return Ok(path);
+        return Ok(Channel::Dir(path));
     }
     if channel == "marmot" {
-        bail!("--channel marmot is not built in yet; use --channel dir:PATH");
+        if cfg!(feature = "marmot") {
+            return Ok(Channel::Marmot);
+        }
+        bail!("--channel marmot needs kiss-bdk built with --features marmot");
     }
     bail!("unknown --channel {channel:?}; use dir:PATH or marmot");
 }
 
-fn open_channel(channel: &str, me: &str) -> Result<Box<dyn Transport>> {
-    Ok(Box::new(DirTransport::open(channel_folder(channel)?, me)?))
+fn open_channel(channel: &str, me: &str, wallet_dir: &Path) -> Result<Box<dyn Transport>> {
+    match channel_folder(channel)? {
+        Channel::Dir(path) => Ok(Box::new(DirTransport::open(path, me)?)),
+        Channel::Marmot => open_marmot(wallet_dir),
+    }
+}
+
+#[cfg(feature = "marmot")]
+fn open_marmot(wallet_dir: &Path) -> Result<Box<dyn Transport>> {
+    let marmot = kiss_bdk::marmot::Marmot::open(wallet_dir, &[])?;
+    Ok(Box::new(marmot))
+}
+
+#[cfg(not(feature = "marmot"))]
+fn open_marmot(_wallet_dir: &Path) -> Result<Box<dyn Transport>> {
+    bail!("--channel marmot needs kiss-bdk built with --features marmot")
 }
 
 fn me(wallet_dir: &Path) -> Result<String> {
