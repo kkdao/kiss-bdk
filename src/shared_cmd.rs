@@ -584,10 +584,22 @@ fn pass_text(pass: Pass) -> &'static str {
 /// Render `request` beside `near` as a PNG, or a GIF when one frame is too
 /// dense or `animated` asks for it.
 fn show_qr(request: &[u8], near: &Path, animated: bool) -> Result<PathBuf> {
-    let stem = near
+    let mut stem = near
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| "shared".to_string());
+    // The QR window's title is the file name. With two wallets' QRs on one
+    // screen, KISS_BDK_SIGNER_NAME (set by the demo scripts) puts the signer
+    // that should scan it first, so the wrong signer never gets it.
+    if let Ok(name) = std::env::var("KISS_BDK_SIGNER_NAME") {
+        let name: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if !name.is_empty() {
+            stem = format!("SCAN-WITH-{name}-{stem}");
+        }
+    }
     let (path, bytes) = match render_psbt_bytes_png(request) {
         Ok(png) if !animated => (near.with_file_name(format!("{stem}-qr.png")), png),
         _ => (
