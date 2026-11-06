@@ -18,4 +18,20 @@ ignore = [
     "RUSTSEC-2026-0098",  # rustls-webpki: URI name constraints wrongly accepted
     "RUSTSEC-2026-0099",  # rustls-webpki: wildcard name constraints wrongly accepted
     "RUSTSEC-2026-0104",  # rustls-webpki: panic parsing a certificate revocation list
+
+    # Only in the optional `marmot` feature, which the default build and the
+    # signing path never compile: these crates arrive through mdk-core 0.8.0
+    # and the MLS stack (openmls, libcrux) it pins. They carry the encrypted
+    # messages between two wallets of a shared send, which hold an unsigned
+    # transaction that becomes public when it is broadcast, never a key.
+    # Delete them when MDK moves to fixed versions.
+    "RUSTSEC-2026-0387",  # crypto-bigint 0.5.5: timing variability
+    "RUSTSEC-2026-0209",  # libcrux-aesgcm: AAD length not limited
+    "RUSTSEC-2026-0211",  # libcrux-aesgcm: tag check not constant time
+    "RUSTSEC-2026-0124",  # libcrux-chacha20poly1305: panic on overlong buffer
+    "RUSTSEC-2026-0330",  # libcrux-kem: panic on short seed
+    "RUSTSEC-2026-0331",  # libcrux-kem: panic on short hybrid key
+    "RUSTSEC-2026-0212",  # libcrux-secrets: constant time select on aarch64
+    "RUSTSEC-2026-0207",  # libcrux-sha3: incremental SHAKE output
+    "RUSTSEC-2026-0208",  # libcrux-sha3: AVX2 SHAKE-256 panic
 ]
