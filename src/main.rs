@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
@@ -1785,8 +1785,58 @@ fn open_qr_image(path: &Path) {
         println!("opened {}", path.display());
         return;
     }
+    #[cfg(target_os = "linux")]
+    {
+        // Close the last QR window first, as on macOS, so the signer never
+        // scans an old one. Every QR file kiss-bdk writes ends in -qr.gif or
+        // -qr.png, and each viewer below is given that path last.
+        let _ = ProcessCommand::new("pkill")
+            .args(["-f", "--", r"-qr\.(gif|png)$"])
+            .status();
+        for (viewer, args) in LINUX_QR_VIEWERS {
+            if ProcessCommand::new(viewer)
+                .args(*args)
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .is_ok()
+            {
+                println!("opened {} in {viewer}", path.display());
+                return;
+            }
+        }
+        println!(
+            "open {} in an image viewer that plays animated GIFs \
+             (install one of eog, loupe, gwenview, nsxiv or mpv)",
+            path.display()
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
     println!("open {}", path.display());
 }
+
+/// Image viewers that play an animated GIF in their own window, tried in
+/// order until one starts. `xdg-open` is not used because it can hand the
+/// file to a web browser.
+#[cfg(target_os = "linux")]
+const LINUX_QR_VIEWERS: &[(&str, &[&str])] = &[
+    ("eog", &[]),
+    ("loupe", &[]),
+    ("gwenview", &[]),
+    ("nsxiv", &["-a"]),
+    ("sxiv", &["-a"]),
+    (
+        "mpv",
+        &[
+            "--loop-file=inf",
+            "--image-display-duration=inf",
+            "--no-osc",
+            "--really-quiet",
+        ],
+    ),
+];
 
 fn scan_psbt(wallet_dir: &Path, out: &Path, original_path: &Path, camera: u32) -> Result<()> {
     if out.exists() {
