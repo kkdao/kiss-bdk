@@ -215,6 +215,11 @@ a transaction uses the fewest inputs it can. Device to computer: animated BC-UR.
 Decoding uses the vendored [k_quirc](vendor/k_quirc), the same decoder the device
 runs.
 
+Requests sent to KISS are limited to 4,096 bytes. Signed replies can grow to
+9,108 bytes as signatures and Silent Payments proofs are added. Signed QR scans
+allow up to ten minutes for large replies in the device's easy-scan mode;
+wallet and scan-key pairing retain their two-minute scan timeout.
+
 ## ✅ Proof
 
 Don't trust, verify. Every flow ran on real hardware and the transactions are on

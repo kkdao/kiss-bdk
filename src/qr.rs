@@ -21,6 +21,10 @@ use ur::{Decoder as UrDecoder, Encoder as UrEncoder, decode as decode_ur};
 use crate::k_quirc::Decoder as QrDecoder;
 
 const CAMERA_TIMEOUT: Duration = Duration::from_secs(120);
+// Narrow-board easy scan emits up to 456 fragments at 600 ms each: one
+// lossless cycle alone takes 274 seconds. Allow two cycles plus scan setup,
+// while retaining a fixed deadline even if malformed frames reset the decoder.
+const SIGNED_CAMERA_TIMEOUT: Duration = Duration::from_secs(600);
 const SCAN_MAX_WIDTH: u32 = 1280;
 const SCAN_MAX_HEIGHT: u32 = 720;
 const CAMERA_FRAME_FORMATS: &[FrameFormat] = &[
@@ -29,13 +33,20 @@ const CAMERA_FRAME_FORMATS: &[FrameFormat] = &[
     FrameFormat::GRAY,
     FrameFormat::RAWRGB,
 ];
-const MAX_PSBT_BYTES: usize = 4096;
-const MAX_STATIC_BASE64_BYTES: usize = MAX_PSBT_BYTES.div_ceil(3) * 4;
+// Match kiss-signer/main/qr_transport.h: signatures and SP shares/proofs
+// can grow a valid request beyond the device's input buffer.
+const MAX_REQUEST_PSBT_BYTES: usize = 4096;
+const MAX_SIGNED_PSBT_BYTES: usize = 9108;
+const MAX_SIGNED_BASE64_BYTES: usize = MAX_SIGNED_PSBT_BYTES.div_ceil(3) * 4;
 const MAX_KISS_QR_VERSION: i16 = 25;
-const MAX_UR_MESSAGE_BYTES: usize = MAX_PSBT_BYTES + 3;
-const MAX_UR_FRAGMENTS: u32 = 128;
+const MAX_REQUEST_UR_FRAGMENTS: u32 = 128;
+// The longest accepted CBOR byte string needs a three-byte length header.
+const MAX_SIGNED_UR_MESSAGE_BYTES: usize = MAX_SIGNED_PSBT_BYTES + 3;
+// The narrow board's easy-scan mode uses 20-byte fragments. Keep a finite
+// ceiling for that worst case; shorter messages may still use smaller parts.
+const MAX_SIGNED_UR_FRAGMENTS: u32 = MAX_SIGNED_UR_MESSAGE_BYTES.div_ceil(20) as u32;
 const MAX_UR_FRAGMENT_BYTES: usize = 256;
-const MAX_UR_FRAMES: usize = 512;
+const MAX_SIGNED_UR_FRAMES: usize = MAX_SIGNED_UR_FRAGMENTS as usize * 4;
 const CRYPTO_PSBT_PREFIX: &str = "ur:crypto-psbt/";
 
 /// Render a PSBT as one static, base64 QR in a PNG image.
@@ -73,9 +84,9 @@ const UR_FRAGMENT_START: usize = 200;
 /// than predicting the interaction between bytewords, CBOR framing and QR
 /// alphanumeric mode, and it cannot be wrong the way a fixed guess can.
 pub fn render_psbt_bytes_animated_gif(psbt: &[u8]) -> Result<Vec<u8>> {
-    if psbt.len() > MAX_PSBT_BYTES {
+    if psbt.len() > MAX_REQUEST_PSBT_BYTES {
         bail!(
-            "PSBT is {} bytes; KISS accepts at most {MAX_PSBT_BYTES}",
+            "PSBT is {} bytes; KISS accepts at most {MAX_REQUEST_PSBT_BYTES}",
             psbt.len()
         );
     }
@@ -96,8 +107,8 @@ fn ur_frames(cbor: &[u8], fragment: usize) -> Result<Vec<QrCode>> {
     let mut encoder = UrEncoder::new(cbor, fragment, "crypto-psbt")
         .map_err(|error| anyhow!("encoding the PSBT as a UR: {error}"))?;
     let count = encoder.fragment_count();
-    if count > MAX_UR_FRAGMENTS as usize {
-        bail!("PSBT needs {count} QR frames; KISS accepts at most {MAX_UR_FRAGMENTS}");
+    if count > MAX_REQUEST_UR_FRAGMENTS as usize {
+        bail!("PSBT needs {count} QR frames; KISS accepts at most {MAX_REQUEST_UR_FRAGMENTS}");
     }
 
     let mut frames = Vec::with_capacity(count);
@@ -177,7 +188,9 @@ fn cbor_byte_string(bytes: &[u8]) -> Vec<u8> {
 
 /// Scan the first static QR from the selected webcam and return its text.
 pub fn scan_descriptor(camera: u32) -> Result<String> {
-    scan_camera(camera, |payload| Ok(wallet_descriptor(payload.trim())))
+    scan_camera(camera, CAMERA_TIMEOUT, |payload| {
+        Ok(wallet_descriptor(payload.trim()))
+    })
 }
 
 /// The two-path descriptor KISS shows, or one built from the bare
@@ -240,7 +253,7 @@ fn neutral_xpub(key: &str) -> Option<String> {
 /// scan forever; and widening it would let the wallet descriptor satisfy a
 /// scan-key import, which fails later and further from the cause.
 pub fn scan_scan_key(camera: u32) -> Result<String> {
-    scan_camera(camera, |payload| {
+    scan_camera(camera, CAMERA_TIMEOUT, |payload| {
         let export = payload.trim();
         if looks_like_scan_key(export) {
             Ok(Some(export.to_owned()))
@@ -275,7 +288,7 @@ pub fn scan_signed_psbt(camera: u32) -> Result<Psbt> {
 /// represent, so the caller decides how to read the bytes.
 pub fn scan_signed_psbt_bytes(camera: u32) -> Result<Vec<u8>> {
     let mut decoder = SignedPsbtDecoder::default();
-    scan_camera(camera, move |payload| {
+    scan_camera(camera, SIGNED_CAMERA_TIMEOUT, move |payload| {
         receive_camera_payload(&mut decoder, payload)
     })
 }
@@ -341,6 +354,7 @@ fn initialize_camera() -> Result<()> {
 
 fn scan_camera<T>(
     camera_index: u32,
+    timeout: Duration,
     mut receive_payload: impl FnMut(&str) -> Result<Option<T>>,
 ) -> Result<T> {
     initialize_camera()?;
@@ -349,7 +363,7 @@ fn scan_camera<T>(
 
     eprintln!("Camera ready. Hold the KISS QR in view...");
     let mut qr_decoder = QrDecoder::new()?;
-    let deadline = Instant::now() + CAMERA_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let frame = camera.frame().context("reading camera frame")?;
         let greyscale = frame
@@ -362,7 +376,10 @@ fn scan_camera<T>(
             }
         }
     }
-    bail!("no complete QR was scanned within 120 seconds")
+    bail!(
+        "no complete QR was scanned within {} seconds",
+        timeout.as_secs()
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -460,8 +477,8 @@ impl SignedPsbtDecoder {
     fn receive(&mut self, payload: &str) -> Result<Option<Vec<u8>>> {
         let payload = payload.trim();
         if payload.starts_with("cHNidP") {
-            if payload.len() > MAX_STATIC_BASE64_BYTES {
-                bail!("static PSBT QR exceeds KISS's {MAX_PSBT_BYTES}-byte limit");
+            if payload.len() > MAX_SIGNED_BASE64_BYTES {
+                bail!("static signed PSBT QR exceeds KISS's {MAX_SIGNED_PSBT_BYTES}-byte limit");
             }
             let raw = base64::engine::general_purpose::STANDARD
                 .decode(payload)
@@ -485,9 +502,9 @@ impl SignedPsbtDecoder {
         }
         self.last_ur = Some(normalized.clone());
         self.ur_frames += 1;
-        if self.ur_frames > MAX_UR_FRAMES {
+        if self.ur_frames > MAX_SIGNED_UR_FRAMES {
             return Err(safety_violation(format!(
-                "signed QR exceeded the {MAX_UR_FRAMES}-frame safety limit"
+                "signed QR exceeded the {MAX_SIGNED_UR_FRAMES}-frame safety limit"
             )));
         }
 
@@ -540,10 +557,10 @@ fn validate_fountain_part(cbor: &[u8]) -> Result<()> {
     if sequence == 0 || sequence_count == 0 || message_length == 0 || fragment.is_empty() {
         bail!("fountain part contains a zero value");
     }
-    if sequence_count > MAX_UR_FRAGMENTS {
+    if sequence_count > MAX_SIGNED_UR_FRAGMENTS {
         return Err(safety_violation("signed QR declares too many fragments"));
     }
-    if message_length > MAX_UR_MESSAGE_BYTES {
+    if message_length > MAX_SIGNED_UR_MESSAGE_BYTES {
         return Err(safety_violation(
             "signed QR declares an oversized PSBT message",
         ));
@@ -571,9 +588,9 @@ fn parse_crypto_psbt_cbor(cbor: &[u8]) -> Result<Vec<u8>> {
 /// Check a scanned payload really is a PSBT of a size KISS could have produced.
 /// Parsing is left to the caller, which knows whether to expect v0 or v2.
 fn parse_raw_psbt(raw: &[u8]) -> Result<Vec<u8>> {
-    if raw.len() > MAX_PSBT_BYTES {
+    if raw.len() > MAX_SIGNED_PSBT_BYTES {
         bail!(
-            "signed PSBT is {} bytes; KISS supports at most {MAX_PSBT_BYTES}",
+            "signed PSBT is {} bytes; KISS supports at most {MAX_SIGNED_PSBT_BYTES}",
             raw.len()
         );
     }
@@ -898,14 +915,15 @@ mod tests {
     #[test]
     fn bounds_fountain_metadata_before_ur_allocation() {
         assert!(validate_fountain_part(&fountain_part_cbor(1, 2, 10, 5)).is_ok());
-        let error = validate_fountain_part(&fountain_part_cbor(1, MAX_UR_FRAGMENTS + 1, 10, 5))
-            .unwrap_err();
+        let error =
+            validate_fountain_part(&fountain_part_cbor(1, MAX_SIGNED_UR_FRAGMENTS + 1, 10, 5))
+                .unwrap_err();
         assert!(error.downcast_ref::<SafetyViolation>().is_some());
         assert!(
             validate_fountain_part(&fountain_part_cbor(
                 1,
                 2,
-                (MAX_UR_MESSAGE_BYTES + 1) as u32,
+                (MAX_SIGNED_UR_MESSAGE_BYTES + 1) as u32,
                 5,
             ))
             .is_err()
@@ -983,7 +1001,7 @@ mod tests {
         let decoded = decoder.receive(&encoded).unwrap().unwrap();
         assert_eq!(decoded, expected.serialize());
 
-        let mut oversized_raw = vec![0_u8; MAX_PSBT_BYTES + 1];
+        let mut oversized_raw = vec![0_u8; MAX_SIGNED_PSBT_BYTES + 1];
         oversized_raw[..5].copy_from_slice(b"psbt\xff");
         let oversized = base64::engine::general_purpose::STANDARD.encode(oversized_raw);
         assert!(decoder.receive(&oversized).is_err());
@@ -1014,10 +1032,13 @@ mod tests {
 
     #[test]
     fn a_psbt_past_the_signing_buffer_is_refused_rather_than_split() {
-        let error = render_psbt_bytes_animated_gif(&vec![0u8; MAX_PSBT_BYTES + 1])
+        let error = render_psbt_bytes_animated_gif(&vec![0u8; MAX_REQUEST_PSBT_BYTES + 1])
             .unwrap_err()
             .to_string();
-        assert!(error.contains(&MAX_PSBT_BYTES.to_string()), "{error}");
+        assert!(
+            error.contains(&MAX_REQUEST_PSBT_BYTES.to_string()),
+            "{error}"
+        );
     }
 
     /// The frames must be what the device already knows how to reassemble, so
@@ -1038,3 +1059,7 @@ mod tests {
         assert_eq!(&message[message.len() - psbt.len()..], &psbt[..]);
     }
 }
+
+#[cfg(test)]
+#[path = "qr_growth_tests.rs"]
+mod signed_growth_tests;

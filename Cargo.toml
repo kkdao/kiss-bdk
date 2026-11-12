@@ -78,3 +78,8 @@ nokhwa-bindings-macos = "0.2.4"
 [dev-dependencies]
 serde_json = "1.0"
 bdk_wallet = { version = "3.1.0", features = ["test-utils"] }
+
+# Rebuild the public signed-growth transport fixture with a supplied C signer.
+[[example]]
+name = "qr-growth-fixture"
+path = "tests/fixtures/qr-growth/generate.rs"
