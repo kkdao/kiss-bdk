@@ -1720,39 +1720,38 @@ fn agrees_with_the_bip375_vectors_it_can_express() {
     let valid = fixture["valid"].as_array().unwrap();
     let invalid = fixture["invalid"].as_array().unwrap();
 
-    // Per-input shares, every one proven, every script matching.
-    for index in [3, 7, 8, 13, 14, 15] {
+    // Per-input shares, every one proven, every script matching. 8, 12 and 13
+    // put three outputs under one scan key, so they hold BIP-375's k order.
+    for index in [2, 6, 7, 8, 12, 13, 14] {
         assert_eq!(audit_vector(&valid[index]), Ok(true), "valid {index}");
     }
+    assert!(
+        [8, 12, 13]
+            .iter()
+            .any(|&index| k_order_differs(&valid[index])),
+        "no passing vector puts a scan key group out of output order"
+    );
     // In progress: shares still missing and no script yet.
-    for index in [16, 17, 18] {
+    for index in [15, 16, 17] {
         assert_eq!(audit_vector(&valid[index]), Ok(false), "valid {index}");
     }
     // Valid in BIP-375 but outside a version 1 shared send, which refuses a
     // global share and any coin that is not P2WPKH or P2TR key path.
     for (index, reason) in [
-        (0, "neither P2WPKH nor P2TR"),
-        (1, "no witness UTXO"),
-        (2, "global ECDH share"),
+        (0, "no witness UTXO"),
+        (1, "global ECDH share"),
+        (3, "global ECDH share"),
         (4, "global ECDH share"),
         (5, "global ECDH share"),
-        (6, "global ECDH share"),
-        (10, "no witness UTXO"),
-        (11, "global ECDH share"),
-        (12, "only be spent through a script"),
+        (9, "no witness UTXO"),
+        (10, "global ECDH share"),
+        (11, "only be spent through a script"),
+        (18, "no witness UTXO"),
         (19, "neither P2WPKH nor P2TR"),
     ] {
         let error = audit_vector(&valid[index]).unwrap_err();
         assert!(error.contains(reason), "valid {index}: {error}");
     }
-    // Two labels of one address: the vector gives k in output order, while
-    // sorting the labelled spend keys gives the other order. A shared send
-    // pays one unlabelled address, so this stays a known difference.
-    let error = audit_vector(&valid[9]).unwrap_err();
-    assert!(
-        error.contains("not the one the shares derive"),
-        "valid 9: {error}"
-    );
 
     for (index, reason) in [
         (0, "not a valid PSBTv2"),
@@ -1776,17 +1775,36 @@ fn agrees_with_the_bip375_vectors_it_can_express() {
         (15, "output 1 has a script, but input 1 has no ECDH share"),
         (16, "output 0 has a script, but input 1 has no ECDH share"),
         (17, "neither P2WPKH nor P2TR"),
-        (18, "sighash type 2"),
-        (19, "only be spent through a script"),
-        (20, "output 0 does not pay the silent payment address"),
+        (18, "no witness UTXO"),
+        (19, "sighash type 2"),
+        (20, "only be spent through a script"),
         (21, "output 0 does not pay the silent payment address"),
-        (22, "output 1 does not pay the silent payment address"),
+        // The two ordering vectors: scripts derived in output order.
+        (22, "output 0 does not pay the silent payment address"),
+        (23, "output 1 does not pay the silent payment address"),
     ] {
         let error = audit_vector(&invalid[index]).unwrap_err();
         assert!(error.contains(reason), "invalid {index}: {error}");
     }
     assert_eq!(valid.len(), 20);
-    assert_eq!(invalid.len(), 23);
+    assert_eq!(invalid.len(), 24);
+}
+
+/// Whether BIP-375's k differs from counting in output order for any output.
+fn k_order_differs(case: &serde_json::Value) -> bool {
+    let psbt = bound_vector(case["psbt"].as_str().unwrap()).unwrap();
+    let recipients: Vec<_> = shared::recipients(&psbt)
+        .unwrap()
+        .into_iter()
+        .map(|recipient| (recipient.output, recipient.scan, recipient.spend))
+        .collect();
+    let ks = kiss_bdk::sp::derive::k_values(&recipients);
+    let mut seen = Vec::new();
+    recipients.iter().any(|(output, scan, _)| {
+        let in_output_order = seen.iter().filter(|other| *other == scan).count() as u32;
+        seen.push(*scan);
+        ks[output] != in_output_order
+    })
 }
 
 /// The reference signer's GenerateProof gives the BIP-374 vectors' proofs,
@@ -1821,7 +1839,46 @@ fn the_reference_signer_makes_the_bip374_proofs() {
         assert_eq!(made_proof.to_vec(), hex(proof), "{comment}");
         made += 1;
     }
-    assert_eq!(made, 8);
+    assert_eq!(made, 10);
+}
+
+/// The reference signer's VerifyProof gives every BIP-374 verification
+/// vector's verdict, including the 0.3.1 rows whose e or s equals n.
+#[test]
+fn the_reference_signer_checks_the_bip374_proofs() {
+    use bdk_wallet::bitcoin::hex::FromHex;
+
+    let hex = |text: &str| Vec::<u8>::from_hex(text).unwrap();
+    let rows = include_str!("fixtures/bip374-verify-proof.csv");
+    let mut checked = 0;
+    let mut boundary = 0;
+    for row in rows.lines().skip(1) {
+        let field: Vec<&str> = row.split(',').collect();
+        let (g, a, b, c, proof, m, expected, comment) = (
+            field[1], field[2], field[3], field[4], field[5], field[6], field[7], field[8],
+        );
+        let point = |text: &str| PublicKey::from_slice(&hex(text)).unwrap();
+        let m: Option<[u8; 32]> = (!m.is_empty()).then(|| hex(m).try_into().unwrap());
+        let proof: [u8; 64] = hex(proof).try_into().unwrap();
+        let verdict = ref_signer::verify_proof(
+            &point(a),
+            &point(b),
+            &point(c),
+            &proof,
+            Some(&point(g)),
+            m.as_ref(),
+        );
+        assert_eq!(verdict, expected == "TRUE", "{comment}");
+        checked += 1;
+        if comment.contains("equal to curve order") {
+            boundary += 1;
+        }
+    }
+    assert_eq!(checked, 17);
+    assert_eq!(
+        boundary, 2,
+        "the e = n and s = n rows must be in the fixture"
+    );
 }
 
 // ---------------------------------------------------------------------------
