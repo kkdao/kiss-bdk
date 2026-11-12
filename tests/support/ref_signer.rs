@@ -439,7 +439,8 @@ fn challenge(
     if let Some(m) = m {
         message.extend_from_slice(m);
     }
-    tagged_hash("BIP0374/challenge", &message)
+    // BIP-374 0.3.0: the challenge is a scalar, written reduced mod n.
+    reduce(tagged_hash("BIP0374/challenge", &message))
 }
 
 /// BIP-374 GenerateProof(a, B, r, G, m). `None` where the BIP says fail.
@@ -477,13 +478,13 @@ pub fn generate_proof(
     let e = challenge(&a_pub, b, &c, &g_bytes, &r1, &r2, m);
 
     // s = (k + e·a) mod n
-    let s = match SecretKey::from_slice(&reduce(e)) {
+    let s = match SecretKey::from_slice(&e) {
         Ok(e_scalar) => a
             .mul_tweak(&Scalar::from(e_scalar))
             .ok()?
             .add_tweak(&Scalar::from(k))
             .ok()?,
-        // e is a multiple of n, so e·a vanishes.
+        // e is zero, so e·a vanishes.
         Err(_) => k,
     };
 
@@ -506,10 +507,14 @@ pub fn verify_proof(
     let g_point = g.unwrap_or(&generator);
 
     let e: [u8; 32] = proof[..32].try_into().unwrap();
+    // BIP-374 0.3.0: e must already be below n; it is never reduced here.
+    if e >= ORDER {
+        return false;
+    }
     let Ok(s) = SecretKey::from_slice(&proof[32..]) else {
         return false;
     };
-    let Ok(e_scalar) = SecretKey::from_slice(&reduce(e)) else {
+    let Ok(e_scalar) = SecretKey::from_slice(&e) else {
         return false;
     };
     let minus_e = e_scalar.negate();
