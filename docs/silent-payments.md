@@ -109,8 +109,22 @@ An **amount** does. It is stored, and later becomes the `witness_utxo` of the
 BIP-376 spend that moves the coin, which BIP-341 signs over. A wrong one is a
 valid signature over a lie, discovered as a rejected broadcast after a walk to
 the device and back. Reading a whole block settles that as a side effect;
-reading a stream does not, so every *found* output is checked against the chain
-before it is stored.
+reading a stream does not, so every *found* output is proven before it is
+stored.
+
+The proof comes from the Electrum server the tweaks came from, not from the
+Esplora backend, because asking a public Esplora about a transaction tells it
+that transaction paid you. At every height the server's block header must hash
+to the block hash Esplora gives for that height; for a payment it also sends
+the transaction and its merkle branch, and the amount and script are read from
+the transaction bytes the branch ties to that header. Esplora is asked for one
+block hash per height, and a hash that disagrees stops the scan at that height
+whether or not anything was found there.
+
+Two limits follow. The Electrum server learns which transactions paid you,
+because it is asked to prove them, so it has to be a node you run yourself.
+And the proof rests on the two sources agreeing: an Electrum server and an
+Esplora backend that lie together can still invent a payment.
 
 ## The scan key
 

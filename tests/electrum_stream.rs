@@ -254,3 +254,80 @@ fn a_failing_callback_stops_the_scan() {
     assert!(error.contains("the database is locked at 100"), "{error}");
     received.recv().expect("the server did answer");
 }
+
+/// The three calls that prove a match read a real server's replies: the raw
+/// transaction, the merkle branch as reversed hex like a txid (what rbitcoin's
+/// `hash_hex_rev` writes), and the 80 byte header.
+#[test]
+fn a_match_is_proven_over_the_same_server() {
+    use bdk_wallet::bitcoin::block::{Header, Version};
+    use bdk_wallet::bitcoin::consensus::encode::serialize_hex;
+    use bdk_wallet::bitcoin::hashes::{Hash, sha256d};
+    use bdk_wallet::bitcoin::{
+        Amount, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Witness, absolute, transaction,
+    };
+    use kiss_bdk::electrum::InclusionSource;
+
+    let tx = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(21_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x20, 0x01]),
+        }],
+    };
+    let txid = tx.compute_txid();
+    let sibling = TxMerkleNode::from_byte_array([0x42; 32]);
+    let mut pair = [0_u8; 64];
+    pair[..32].copy_from_slice(&sibling.to_byte_array());
+    pair[32..].copy_from_slice(&txid.to_byte_array());
+    let header = Header {
+        version: Version::TWO,
+        prev_blockhash: BlockHash::from_byte_array([0x01; 32]),
+        merkle_root: TxMerkleNode::from_byte_array(sha256d::Hash::hash(&pair).to_byte_array()),
+        time: 1,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 2,
+    };
+
+    let (tx_hex, header_hex, sibling_hex) = (
+        serialize_hex(&tx),
+        serialize_hex(&header),
+        sibling.to_string(),
+    );
+    let (asked_tx, asked) = mpsc::channel();
+    let address = serve(move |method, id| {
+        asked_tx.send(method.to_string()).unwrap();
+        match method {
+            "blockchain.transaction.get" => vec![result(id, &format!("\"{tx_hex}\""))],
+            "blockchain.transaction.get_merkle" => vec![result(
+                id,
+                &format!(r#"{{"block_height":7,"merkle":["{sibling_hex}"],"pos":1}}"#),
+            )],
+            "blockchain.block.header" => vec![result(id, &format!("\"{header_hex}\""))],
+            _ => Vec::new(),
+        }
+    });
+
+    let mut server = Electrum::connect(&address).unwrap();
+    assert_eq!(server.header(7).unwrap(), header);
+    let (got_tx, pos, branch) = server.placement(&txid, 7).unwrap();
+    assert_eq!(got_tx, tx);
+    assert_eq!(pos, 1);
+    assert_eq!(branch, [sibling], "branch hashes are read as reversed hex");
+    assert_eq!(
+        asked.try_iter().collect::<Vec<_>>(),
+        [
+            "blockchain.block.header",
+            "blockchain.transaction.get",
+            "blockchain.transaction.get_merkle"
+        ]
+    );
+}

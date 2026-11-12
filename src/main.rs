@@ -819,6 +819,11 @@ fn sp_scan(
 /// attached to its transaction and to the taproot outputs that transaction
 /// created, which is the whole of what the match needs — so a range of empty
 /// heights costs one streamed line each and nothing else.
+///
+/// The Esplora backend is asked for one block hash per height and nothing
+/// else, so it cannot tell which transactions paid this wallet. A match is
+/// proven over a second connection to the same tweak server instead; see
+/// `electrum::scan_height`.
 fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
     let (mut connection, _wallet) = open_wallet(wallet_dir, &config, chain)?;
@@ -827,6 +832,9 @@ fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Resu
         .context("no silent payment keys; run sp-pair with KISS's export first")?;
 
     let mut server = electrum::Electrum::connect(address)?;
+    // The first connection is busy streaming for the whole scan, so proofs for
+    // what it finds are asked for on a second one to the same server.
+    let mut prover = electrum::Electrum::connect(address)?;
 
     // Heights mean different things on different chains, and a server that
     // answers confidently about the wrong one produces a scan that finds
@@ -856,28 +864,27 @@ fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Resu
     let mut last = None;
     let count = tip - start + 1;
     server.tweaks(start, count, |height, candidates| {
-        for candidate in &candidates {
-            let found = spscan::scan_candidate(&keys, &scanner, candidate, height)?;
-            for item in &found {
-                // The stream is trusted for which transactions to look at — a
-                // wrong tweak just fails to match — but never for what they
-                // paid. See `confirm_on_chain`.
-                confirm_on_chain(&esplora, item)?;
-                println!(
-                    "found {} sats at {} in block {height}",
-                    item.out.amount.to_sat(),
-                    item.out.outpoint
-                );
-            }
-            total += found.len();
-            spstore::put_found(&mut connection, &found)?;
+        // The stream is trusted for which transactions to look at, since a
+        // wrong tweak just fails to match, but never for what they paid. The hash
+        // comes from Esplora, asked at every height, and is also what lets the
+        // next scan tell a resumed chain from a reorganised one.
+        let (hash, found) = electrum::scan_height(
+            &keys,
+            &scanner,
+            height,
+            &candidates,
+            |height| Ok(esplora.get_block_hash(height)?),
+            &mut prover,
+        )?;
+        for item in &found {
+            println!(
+                "found {} sats at {} in block {height}",
+                item.out.amount.to_sat(),
+                item.out.outpoint
+            );
         }
-        // The hash is what lets the next scan tell a resumed chain from a
-        // reorganised one. Read from Esplora rather than the tweak stream,
-        // which publishes no headers.
-        let hash = esplora
-            .get_block_hash(height)
-            .with_context(|| format!("looking up block {height}"))?;
+        total += found.len();
+        spstore::put_found(&mut connection, &found)?;
         spstore::set_watermark(&mut connection, height, hash)?;
         last = Some(height);
         Ok(())
@@ -893,53 +900,6 @@ fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Resu
         // "searched" to "asked about".
         None => bail!("the server at {address} sent no heights for {start} to {tip}"),
     }
-}
-
-/// Confirm a found output exists on chain exactly as it was published.
-///
-/// A tweak needs no trust: it either re-derives the output key or it does not.
-/// An *amount* does. It is stored, and later becomes the `witness_utxo` of the
-/// BIP-376 spend that moves the coin — which BIP-341 signs over. A wrong one is
-/// a valid signature over a lie, discovered as a rejected broadcast after a
-/// walk to the device and back.
-///
-/// Reading the block, the way a BlindBit scan does, settles that as a side
-/// effect. Reading a stream does not, so it is settled here instead: one pair
-/// of requests per payment found, rather than one block per height.
-fn confirm_on_chain(esplora: &BlockingClient, found: &spscan::Found) -> Result<()> {
-    let outpoint = found.out.outpoint;
-    let tx = esplora
-        .get_tx(&outpoint.txid)
-        .with_context(|| format!("checking {outpoint} against the chain"))?
-        .with_context(|| format!("{} is not in the chain the backend serves", outpoint.txid))?;
-
-    let txout = tx
-        .output
-        .get(outpoint.vout as usize)
-        .with_context(|| format!("{outpoint} is past the end of its transaction"))?;
-    if txout.script_pubkey != found.out.script_pubkey {
-        bail!("{outpoint} does not pay the script the tweak server published");
-    }
-    if txout.value != found.out.amount {
-        bail!(
-            "{outpoint} holds {} on chain, not the {} the tweak server published",
-            txout.value,
-            found.out.amount
-        );
-    }
-
-    let status = esplora
-        .get_tx_status(&outpoint.txid)
-        .with_context(|| format!("checking where {} was mined", outpoint.txid))?;
-    if status.block_height != Some(found.height) {
-        bail!(
-            "the tweak server placed {} in block {}, the chain in {:?}",
-            outpoint.txid,
-            found.height,
-            status.block_height
-        );
-    }
-    Ok(())
 }
 
 /// What the backend says the next block costs, rounded up to whole sat/vB.
