@@ -19,6 +19,16 @@ ignore = [
     "RUSTSEC-2026-0099",  # rustls-webpki: wildcard name constraints wrongly accepted
     "RUSTSEC-2026-0104",  # rustls-webpki: panic parsing a certificate revocation list
 
+    # libsqlite3-sys 0.28.0 bundles SQLite 3.45, which can hand back stale
+    # process memory when it opens a database together with a crafted -wal
+    # file. The fix is libsqlite3-sys 0.39 (rusqlite 0.41), and every
+    # bdk_chain release through 0.23.4 requires rusqlite ^0.31, so nothing
+    # here can take it. The only database this opens is wallet.sqlite in the
+    # owner's own wallet directory; someone able to plant files there can
+    # already replace the wallet and read the scan key beside it. Delete this
+    # when bdk_chain moves to rusqlite 0.41.
+    "RUSTSEC-2026-0459",  # libsqlite3-sys: stale memory from a crafted -wal
+
     # Only in the optional `marmot` feature, which the default build and the
     # signing path never compile: these crates arrive through mdk-core 0.8.0
     # and the MLS stack (openmls, libcrux) it pins. They carry the encrypted
