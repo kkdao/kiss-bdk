@@ -541,6 +541,12 @@ pub fn derive_scripts(psbt: &PsbtV2, shares: &Shares) -> Result<BTreeMap<usize, 
     let outpoints: Vec<OutPoint> = psbt.inputs.iter().map(outpoint).collect();
     let input_hash = derive::input_hash(&outpoints, &a_sum)?;
 
+    let ks = derive::k_values(
+        &recipients
+            .iter()
+            .map(|recipient| (recipient.output, recipient.scan, recipient.spend))
+            .collect::<Vec<_>>(),
+    );
     for scan in complete {
         let parts: Vec<SecpPublicKey> = psbt
             .inputs
@@ -549,14 +555,9 @@ pub fn derive_scripts(psbt: &PsbtV2, shares: &Shares) -> Result<BTreeMap<usize, 
             .collect();
         let c_sum = sum(&parts).context("the ECDH shares add up to no point at all")?;
 
-        let mut group: Vec<&Recipient> = recipients
-            .iter()
-            .filter(|recipient| recipient.scan == scan)
-            .collect();
-        // Stable, so recipients with one spend key stay in output order.
-        group.sort_by_key(|recipient| recipient.spend.serialize());
-        for (k, recipient) in group.iter().enumerate() {
-            let script = derive::output_script(&c_sum, &recipient.spend, &input_hash, k as u32)?;
+        for recipient in recipients.iter().filter(|recipient| recipient.scan == scan) {
+            let k = ks[&recipient.output];
+            let script = derive::output_script(&c_sum, &recipient.spend, &input_hash, k)?;
             scripts.insert(recipient.output, script);
         }
     }

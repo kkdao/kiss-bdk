@@ -83,16 +83,25 @@ fn rederives_the_output_scripts_in_the_valid_vectors() {
             .collect();
         let input_hash = derive::input_hash(&outpoints, &a_sum).unwrap();
 
-        // Recipients sharing a scan key form a group; k is the position within it.
-        let mut seen: Vec<PublicKey> = Vec::new();
-        for output in &psbt.outputs {
-            let Some(info) = &output.sp_v0_info else {
-                continue;
-            };
-            let scan = PublicKey::from_slice(&info[..33]).unwrap();
-            let spend = PublicKey::from_slice(&info[33..]).unwrap();
-            let k = seen.iter().filter(|other| **other == scan).count() as u32;
-            seen.push(scan);
+        // Recipients sharing a scan key form a group; k is the position within
+        // it, in BIP-375's order (spend key, then output index).
+        let recipients: Vec<(usize, PublicKey, PublicKey)> = psbt
+            .outputs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, output)| {
+                let info = output.sp_v0_info.as_ref()?;
+                Some((
+                    index,
+                    PublicKey::from_slice(&info[..33]).unwrap(),
+                    PublicKey::from_slice(&info[33..]).unwrap(),
+                ))
+            })
+            .collect();
+        let ks = derive::k_values(&recipients);
+        for &(index, scan, spend) in &recipients {
+            let output = &psbt.outputs[index];
+            let k = ks[&index];
 
             let Some(share) = psbt.global.sp_ecdh_shares.get(&CompressedPublicKey(scan)) else {
                 continue;

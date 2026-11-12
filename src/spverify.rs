@@ -41,19 +41,27 @@ pub fn verify(original: &PsbtV2, signed: &PsbtV2) -> Result<Vec<VerifiedOutput>>
     let a_sum = input_key_sum(original)?;
     let input_hash = derive::input_hash(&outpoints, &a_sum)?;
 
-    let mut verified = Vec::new();
-    let mut group_order: Vec<SecpPublicKey> = Vec::new();
+    let mut recipients = Vec::new();
     for (index, output) in signed.outputs.iter().enumerate() {
         let Some(info) = &output.sp_v0_info else {
             continue;
         };
+        if info.len() != 66 {
+            bail!("output {index} names a silent payment recipient of the wrong length");
+        }
         let scan = SecpPublicKey::from_slice(&info[..33]).context("bad silent payment scan key")?;
         let spend =
             SecpPublicKey::from_slice(&info[33..]).context("bad silent payment spend key")?;
+        recipients.push((index, scan, spend));
+    }
+    // Recipients sharing a scan key form a group; k is the position in it, in
+    // BIP-375's order rather than output order.
+    let ks = derive::k_values(&recipients);
 
-        // Recipients sharing a scan key form a group; k is the position in it.
-        let k = group_order.iter().filter(|other| **other == scan).count() as u32;
-        group_order.push(scan);
+    let mut verified = Vec::new();
+    for &(index, scan, spend) in &recipients {
+        let output = &signed.outputs[index];
+        let k = ks[&index];
 
         let key = CompressedPublicKey(scan);
         let share = signed.global.sp_ecdh_shares.get(&key).with_context(|| {

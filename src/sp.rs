@@ -112,6 +112,38 @@ pub(crate) fn from_base32(groups: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bdk_wallet::bitcoin::secp256k1::{Secp256k1, SecretKey};
+
+    fn key(byte: u8) -> PublicKey {
+        SecretKey::from_slice(&[byte; 32])
+            .unwrap()
+            .public_key(&Secp256k1::new())
+    }
+
+    #[test]
+    fn k_counts_by_spend_key_then_output_index_within_a_scan_key() {
+        let (scan_a, scan_b) = (key(1), key(2));
+        let (low, high) = {
+            let (x, y) = (key(3), key(4));
+            if x.serialize() < y.serialize() {
+                (x, y)
+            } else {
+                (y, x)
+            }
+        };
+        // Output order puts the higher spend key first, a second scan key in
+        // the middle, and the same code twice at the end.
+        let ks = derive::k_values(&[
+            (0, scan_a, high),
+            (1, scan_b, high),
+            (2, scan_a, low),
+            (3, scan_a, low),
+        ]);
+        assert_eq!(ks[&2], 0, "the lower spend key comes first");
+        assert_eq!(ks[&3], 1, "the same code twice keeps output order");
+        assert_eq!(ks[&0], 2, "the higher spend key comes last");
+        assert_eq!(ks[&1], 0, "another scan key counts on its own");
+    }
 
     // BIP-352 test vector recipient (bitcoin/bips, bip-0352 test vectors).
     const MAINNET: &str = "sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv";
@@ -156,6 +188,8 @@ mod tests {
 ///
 /// `main/kiss_sp.c` (`sp_input_hash`, `sp_derive_group`) is the reference.
 pub mod derive {
+    use std::collections::BTreeMap;
+
     use anyhow::{Context, Result};
     use bdk_wallet::bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
     use bdk_wallet::bitcoin::{OutPoint, ScriptBuf};
@@ -182,6 +216,31 @@ pub mod derive {
         message.extend_from_slice(lowest);
         message.extend_from_slice(&a_sum.serialize());
         Ok(tagged_hash("BIP0352/Inputs", &message))
+    }
+
+    /// BIP-375's `k` for every silent payment output, keyed by output index.
+    ///
+    /// `k` counts inside one scan key group, and BIP-375 fixes the order it
+    /// counts in: the codes sorted lexicographically, ties broken by output
+    /// index. Inside one scan key that is the spend key, then the index. Output
+    /// order is not it: two codes sharing a scan key (two labels of one
+    /// address, or a payment beside labelled change) can sit in either order.
+    /// A signer and a verifier that disagreed would derive different scripts
+    /// from the same share, and BIP-352 scanning stops at the first `k` it
+    /// does not find, so the payment would be lost to its recipient.
+    ///
+    /// Each entry is `(output index, scan key, spend key)`.
+    pub fn k_values(outputs: &[(usize, PublicKey, PublicKey)]) -> BTreeMap<usize, u32> {
+        let mut sorted: Vec<&(usize, PublicKey, PublicKey)> = outputs.iter().collect();
+        sorted.sort_by_key(|(index, scan, spend)| (scan.serialize(), spend.serialize(), *index));
+        let mut next: BTreeMap<[u8; 33], u32> = BTreeMap::new();
+        let mut ks = BTreeMap::new();
+        for (index, scan, _) in sorted {
+            let k = next.entry(scan.serialize()).or_insert(0);
+            ks.insert(*index, *k);
+            *k += 1;
+        }
+        ks
     }
 
     /// The P2TR script for recipient `k` within a scan-key group.
