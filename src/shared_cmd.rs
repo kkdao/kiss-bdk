@@ -173,7 +173,7 @@ pub fn run(wallet_dir: &Path, command: SharedCommand) -> Result<()> {
             channel_folder(&channel)?;
             let mut transport = open_channel(&channel, &me(wallet_dir)?, wallet_dir)?;
             let wallet = &mut BdkWallet::open(wallet_dir)?;
-            let fee_rate = fee_rate_or_estimate(&wallet.config, fee_rate)?;
+            let fee_rate = fee_rate_or_estimate(&wallet.config.esplora, fee_rate)?;
             check_recipient(&to, wallet.chain)?;
             let me = me(wallet_dir)?;
             let seed = format!("{me}:{to}:{sats}:{}", now_nanos());
@@ -265,7 +265,7 @@ pub fn run(wallet_dir: &Path, command: SharedCommand) -> Result<()> {
         } => {
             refuse_existing(&out)?;
             let wallet = &mut BdkWallet::open(wallet_dir)?;
-            let fee_rate = fee_rate_or_estimate(&wallet.config, fee_rate)?;
+            let fee_rate = fee_rate_or_estimate(&wallet.config.esplora, fee_rate)?;
             check_recipient(&to, wallet.chain)?;
             let me = me(wallet_dir)?;
             let seed = format!("{me}:{to}:{sats}:{}", now_nanos());
@@ -515,12 +515,20 @@ fn check_recipient(to: &str, chain: Chain) -> Result<()> {
     }
 }
 
-fn fee_rate_or_estimate(config: &Config, fee_rate: Option<u64>) -> Result<u64> {
-    match fee_rate {
-        Some(0) => bail!("--fee-rate must be greater than zero"),
-        Some(rate) => Ok(rate),
-        None => Ok(crate::next_block_fee_rate(&config.esplora).to_sat_per_vb_ceil()),
+/// The rate a new shared send is proposed at: `--fee-rate` as given, checked
+/// now, or the backend's estimate, fetched only if `begin` makes a new send.
+fn fee_rate_or_estimate(
+    esplora: &str,
+    fee_rate: Option<u64>,
+) -> Result<impl FnOnce() -> Result<u64> + use<>> {
+    if fee_rate == Some(0) {
+        bail!("--fee-rate must be greater than zero");
     }
+    let esplora = esplora.to_owned();
+    Ok(move || match fee_rate {
+        Some(rate) => Ok(rate),
+        None => Ok(crate::next_block_fee_rate(&esplora)?.to_sat_per_vb_ceil()),
+    })
 }
 
 fn now_nanos() -> u128 {

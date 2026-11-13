@@ -1387,12 +1387,14 @@ fn pay_over_a_channel(make: impl FnOnce(&str, &str) -> Channels) {
             &me_a,
             &payee.address,
             SATS,
-            FEE_RATE,
+            || Ok(FEE_RATE),
             b"dir"
         )
         .unwrap()
     );
-    // Running the same command again carries the same send on.
+    // Running the same command again carries the same send on, and never
+    // asks for a fee rate: a backend refusing to give one, or giving one
+    // over the ceiling, must not stop a send that is already agreed.
     assert!(
         !sharedflow::begin(
             &store_a,
@@ -1400,7 +1402,7 @@ fn pay_over_a_channel(make: impl FnOnce(&str, &str) -> Channels) {
             &me_a,
             &payee.address,
             SATS,
-            FEE_RATE,
+            || anyhow::bail!("a resumed shared send asked for a fee rate"),
             b"dir"
         )
         .unwrap()

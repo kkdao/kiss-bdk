@@ -956,18 +956,43 @@ fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Resu
 ///
 /// A backend that cannot answer is not fatal. `MINIMUM` is what a test network
 /// wants when it is quiet, and `--fee-rate` overrides all of this anyway.
-fn next_block_fee_rate(esplora_url: &str) -> FeeRate {
-    const MINIMUM: u64 = 2;
-
+///
+/// A backend that answers too high is. The estimate is the backend's word,
+/// and a hostile or broken one can name any rate: 50 sat/vB turns a 10,000
+/// sat payment into a 7,000 sat fee. So an estimate above `MAXIMUM` stops the
+/// command and says what was asked, rather than being clamped into a rate
+/// that may never confirm. `--fee-rate` takes a higher one on purpose.
+fn next_block_fee_rate(esplora_url: &str) -> Result<FeeRate> {
     let estimate = match fetch_next_block_estimate(esplora_url) {
-        Ok(rate) => rate.max(MINIMUM),
+        Ok(rate) => accept_estimate(rate)?,
         Err(error) => {
-            eprintln!("warning: no fee estimate ({error:#}); using {MINIMUM} sat/vB");
-            MINIMUM
+            eprintln!("warning: no fee estimate ({error:#}); using {MINIMUM_FEE_RATE} sat/vB");
+            MINIMUM_FEE_RATE
         }
     };
     println!("fee rate: {estimate} sat/vB (next block; --fee-rate overrides)");
-    FeeRate::from_sat_per_vb(estimate).unwrap_or(FeeRate::BROADCAST_MIN)
+    Ok(FeeRate::from_sat_per_vb(estimate).unwrap_or(FeeRate::BROADCAST_MIN))
+}
+
+/// The floor a quiet test network wants.
+const MINIMUM_FEE_RATE: u64 = 2;
+
+/// The most a backend's estimate is taken at without being told. This
+/// wallet runs only on test networks, where the next block rarely asks for
+/// more; one that does is asked to confirm it with `--fee-rate`.
+const MAXIMUM_FEE_RATE: u64 = 25;
+
+/// The estimate as it will be used: raised to the floor, refused above the
+/// ceiling. Split out so both edges can be tested without a server.
+fn accept_estimate(rate: u64) -> Result<u64> {
+    if rate > MAXIMUM_FEE_RATE {
+        bail!(
+            "the backend's next-block estimate is {rate} sat/vB, above the \
+             {MAXIMUM_FEE_RATE} sat/vB this takes without being told; pass \
+             --fee-rate {rate} to pay it, or a lower --fee-rate to wait"
+        );
+    }
+    Ok(rate.max(MINIMUM_FEE_RATE))
 }
 
 /// Split out so the shape of the answer can be tested without a server.
@@ -1589,7 +1614,7 @@ fn create_psbt(
     let recipient = parse_destination(destination, chain)?;
     let fee_rate = match fee_rate {
         Some(given) => FeeRate::from_sat_per_vb(given).context("fee rate is too large")?,
-        None => next_block_fee_rate(&config.esplora),
+        None => next_block_fee_rate(&config.esplora)?,
     };
 
     let (mut connection, mut wallet) = open_wallet(wallet_dir, &config, chain)?;
@@ -2410,6 +2435,20 @@ mod tests {
     /// The exact body mempool.space returns, which `esplora_client` rejects for
     /// its 203 status. Rounding is up: a transaction one satoshi under what the
     /// mempool wants is one that never confirms.
+    #[test]
+    fn a_backend_estimate_is_floored_and_capped() {
+        assert_eq!(accept_estimate(0).unwrap(), MINIMUM_FEE_RATE);
+        assert_eq!(accept_estimate(1).unwrap(), MINIMUM_FEE_RATE);
+        assert_eq!(accept_estimate(7).unwrap(), 7);
+        assert_eq!(accept_estimate(MAXIMUM_FEE_RATE).unwrap(), MAXIMUM_FEE_RATE);
+        // The review's example: 50 sat/vB is refused, and the message names
+        // the rate and the flag that accepts it.
+        let error = accept_estimate(50).unwrap_err().to_string();
+        assert!(error.contains("50 sat/vB"), "{error}");
+        assert!(error.contains("--fee-rate 50"), "{error}");
+        assert!(accept_estimate(u64::MAX).is_err());
+    }
+
     #[test]
     fn reads_the_next_block_estimate_and_rounds_up() {
         let body = r#"{"1":6.511,"2":6.511,"6":5.01,"144":0.2,"1008":0.1}"#;

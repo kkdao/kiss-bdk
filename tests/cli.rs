@@ -530,3 +530,71 @@ fn a_node_never_makes_sp_balance_forget_a_coin() {
         );
     }
 }
+
+/// An Esplora that answers every request with `body` as JSON, forever.
+fn fee_server(body: &'static str) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buffer = [0_u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    url
+}
+
+/// The real create, against a backend that asks for an absurd fee rate: it
+/// stops before writing anything, and says how to pay that rate on purpose.
+#[test]
+fn create_refuses_a_backend_fee_estimate_above_the_ceiling() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (body, refused) in [(r#"{"1":50.0}"#, true), (r#"{"1":3.0}"#, false)] {
+        let wallet_dir = tmp.path().join(format!("wallet-{refused}"));
+        let esplora = fee_server(body);
+        let (ok, _, stderr) = run(
+            &wallet_dir,
+            &[
+                "init",
+                "--network",
+                "signet",
+                "--descriptor",
+                PUBLIC_TEST_DESCRIPTOR,
+                "--esplora",
+                &esplora,
+            ],
+        );
+        assert!(ok, "init failed: {stderr}");
+        let out = wallet_dir.join("unsigned.psbt");
+        let (ok, stdout, stderr) = run(
+            &wallet_dir,
+            &[
+                "create",
+                "--to",
+                KISS_FIRST_ADDRESS,
+                "--sats",
+                "1000",
+                "--out",
+                out.to_str().unwrap(),
+            ],
+        );
+        assert!(!ok, "an empty wallet cannot pay anyway");
+        assert!(!out.exists(), "a PSBT was written");
+        if refused {
+            assert!(stderr.contains("--fee-rate 50"), "{stderr}");
+            assert!(!stdout.contains("fee rate:"), "{stdout}");
+        } else {
+            // Past the fee step: the 3 sat/vB estimate was taken, and what
+            // stops it is the empty wallet.
+            assert!(stdout.contains("fee rate: 3 sat/vB"), "{stdout}");
+            assert!(!stderr.contains("--fee-rate"), "{stderr}");
+        }
+    }
+}

@@ -137,7 +137,8 @@ verifies every signature, and finalizes, all before anything reaches the
 network. Add `--dry-run` to do everything except send.
 
 The fee rate comes from the backend's next-block estimate; `--fee-rate`
-overrides it.
+overrides it. An estimate above 25 sat/vB is refused rather than used, since
+the backend can name any rate, and `--fee-rate` pays a higher one on purpose.
 
 **Faucets.** Mutinynet is the only network with a faucet you can call from the
 command line, and it needs a token: sign in at

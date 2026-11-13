@@ -203,13 +203,18 @@ pub enum NotJoined {
 /// A wallet folder holds one shared send at a time. An unfinished one with
 /// the same recipient and amount is simply carried on, so running the same
 /// command again is how it resumes. Returns `true` when a new one was made.
+///
+/// `fee_rate` is asked only when a new send is made. A resumed one already
+/// has its rate, agreed with the other wallet, and a fresh estimate could
+/// only stop it: a backend asking for more than it may name would make the
+/// send that is half done impossible to finish.
 pub fn begin(
     store: &Store,
     wallet: &mut dyn WalletLink,
     me: &str,
     to: &str,
     sats: u64,
-    fee_rate: u64,
+    fee_rate: impl FnOnce() -> Result<u64>,
     seed: &[u8],
 ) -> Result<bool> {
     let mut saved = store.load()?;
@@ -233,6 +238,7 @@ pub fn begin(
 
     let recipient = sp::decode(to)?;
     shared::check_amount(sats)?;
+    let fee_rate = fee_rate()?;
     let half = wallet.fund(&recipient, shared::share_of(sats, Role::Start), fee_rate)?;
     let session = Session::propose(me, &shared::session_id(seed), &half, to, sats, fee_rate)?;
     saved.session = Some(session);
