@@ -127,7 +127,10 @@ whether its transaction still exists, and each question names one of your
 coins. They ask the node the last `sp-scan --electrum` used, or the one given
 with `--electrum`, and only ask Esplora when no node has been used or when
 told to with `--esplora-lookups`, saying so when they do. A node that cannot be
-reached stops the command rather than handing the list to Esplora.
+reached stops the command rather than handing the list to Esplora. A coin the
+node says it does not know is reported and kept, never deleted on one node's
+word, and a reply that is malformed or contradicts itself is an error rather
+than a spendable coin.
 
 Two limits follow. The Electrum server learns which transactions paid you,
 because it is asked to prove them, so it has to be a node you run yourself.

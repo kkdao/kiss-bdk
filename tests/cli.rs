@@ -328,6 +328,12 @@ fn counting_listener() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize
 
 /// One Electrum connection that knows one transaction, unspent.
 fn fake_node(tx_hex: String) -> String {
+    fake_node_answering(Ok(tx_hex))
+}
+
+/// One Electrum connection whose transaction lookup returns `tx`: the hex,
+/// or a refusal with that message.
+fn fake_node_answering(tx: Result<String, String>) -> String {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
@@ -341,13 +347,25 @@ fn fake_node(tx_hex: String) -> String {
         while reader.read_line(&mut line).unwrap_or(0) > 0 {
             let request: serde_json::Value = serde_json::from_str(&line).unwrap();
             let id = request["id"].as_u64().unwrap();
-            let result = match request["method"].as_str().unwrap() {
-                "server.features" => serde_json::json!({ "genesis_hash": SIGNET_GENESIS }),
-                "blockchain.transaction.get" => serde_json::json!(tx_hex),
-                "blockchain.outpoint.get_status" => serde_json::json!({ "spent": false }),
-                _ => serde_json::Value::Null,
+            let method = request["method"].as_str().unwrap();
+            let reply = match (method, &tx) {
+                ("blockchain.transaction.get", Err(message)) => serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": { "code": -32600, "message": message },
+                }),
+                _ => {
+                    let result = match method {
+                        "server.version" => serde_json::json!(["fake", "1.6"]),
+                        "server.features" => {
+                            serde_json::json!({ "genesis_hash": SIGNET_GENESIS })
+                        }
+                        "blockchain.transaction.get" => serde_json::json!(tx.clone().unwrap()),
+                        "blockchain.outpoint.get_status" => serde_json::json!({ "spent": false }),
+                        _ => serde_json::Value::Null,
+                    };
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                }
             };
-            let reply = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
             if writeln!(writer, "{reply}").is_err() {
                 return;
             }
@@ -360,6 +378,11 @@ fn fake_node(tx_hex: String) -> String {
 /// A wallet holding one found silent payment, with `node` remembered as the
 /// owner's Electrum node, and Esplora pointed at `esplora`.
 fn wallet_with_a_coin(wallet_dir: &Path, esplora: &str, node: &str) -> String {
+    wallet_with_a_coin_at(wallet_dir, esplora, node, 100)
+}
+
+/// The same, with the coin recorded at `height` (0 for one seen unconfirmed).
+fn wallet_with_a_coin_at(wallet_dir: &Path, esplora: &str, node: &str, height: u32) -> String {
     use bdk_wallet::bitcoin::consensus::encode::serialize_hex;
     use bdk_wallet::bitcoin::secp256k1::SecretKey;
     use bdk_wallet::bitcoin::{
@@ -399,7 +422,7 @@ fn wallet_with_a_coin(wallet_dir: &Path, esplora: &str, node: &str) -> String {
     kiss_bdk::spstore::put_found(
         &mut connection,
         &[kiss_bdk::spscan::Found {
-            height: 100,
+            height,
             out: bdk_sp::receive::SpOut {
                 outpoint: OutPoint::new(tx.compute_txid(), 0),
                 tweak: SecretKey::from_slice(&[0x33; 32]).unwrap(),
@@ -465,4 +488,45 @@ fn an_unreachable_node_is_an_error_not_a_quiet_fallback() {
     assert!(!ok, "an unreachable node was not reported");
     assert!(stderr.contains("--esplora-lookups"), "{stderr}");
     assert_eq!(hits.load(Ordering::SeqCst), 0, "fell back to Esplora");
+}
+
+/// An unconfirmed coin the node does not know is reported and kept, whatever
+/// the node says: one node's "not found" does not prove a payment was
+/// replaced, and an unrelated error says nothing about it at all.
+#[test]
+fn a_node_never_makes_sp_balance_forget_a_coin() {
+    for (answer, says) in [
+        ("tx not found", "unknown to"),
+        ("Method not found", "(unverified)"),
+        ("No such database table", "(unverified)"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let wallet_dir = tmp.path().join("wallet");
+        let (esplora, _) = counting_listener();
+        wallet_with_a_coin_at(&wallet_dir, &esplora, "127.0.0.1:1", 0);
+
+        for _ in 0..2 {
+            let node = fake_node_answering(Err(answer.to_string()));
+            let connection =
+                bdk_wallet::rusqlite::Connection::open(wallet_dir.join("wallet.sqlite")).unwrap();
+            kiss_bdk::spstore::set_node(&connection, &node).unwrap();
+            drop(connection);
+
+            let (ok, stdout, stderr) = run(&wallet_dir, &["sp-balance"]);
+            assert!(ok, "{answer}: {stderr}");
+            assert!(!stdout.contains("forgot"), "{answer}: {stdout}");
+            assert!(stdout.contains(says), "{answer}: {stdout}");
+            assert!(
+                stdout.contains("21000 sats at"),
+                "{answer}: the coin is gone: {stdout}"
+            );
+        }
+        let connection =
+            bdk_wallet::rusqlite::Connection::open(wallet_dir.join("wallet.sqlite")).unwrap();
+        assert_eq!(
+            kiss_bdk::spstore::outputs(&connection).unwrap().len(),
+            1,
+            "{answer}: the row was deleted"
+        );
+    }
 }

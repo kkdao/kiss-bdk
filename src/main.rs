@@ -11,9 +11,7 @@ use bdk_esplora::esplora_client::{BlockingClient, Builder};
 use bdk_wallet::bitcoin::address::NetworkUnchecked;
 use bdk_wallet::bitcoin::bip32::KeySource;
 use bdk_wallet::bitcoin::secp256k1::PublicKey;
-use bdk_wallet::bitcoin::{
-    Address, Amount, FeeRate, Network, OutPoint, Psbt, Sequence, absolute, constants,
-};
+use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt, Sequence, absolute, constants};
 use bdk_wallet::coin_selection::LargestFirstCoinSelection;
 use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
@@ -1137,6 +1135,8 @@ fn coin_lookup(
                     config.esplora
                 )
             })?;
+            node.negotiate()
+                .with_context(|| format!("agreeing a protocol version with {address}"))?;
             let expected = constants::genesis_block(chain.network()).block_hash();
             let genesis = node.genesis_hash()?;
             if genesis != expected {
@@ -1173,11 +1173,11 @@ impl CoinLookup {
     }
 
     /// `Ok(None)` when the source says the output does not exist.
-    fn spent(&mut self, outpoint: OutPoint) -> Result<Option<bool>> {
+    fn spent(&mut self, out: &spstore::StoredOut) -> Result<Option<bool>> {
         match self {
-            CoinLookup::Node { node, .. } => node.output_status(&outpoint),
+            CoinLookup::Node { node, .. } => node.output_status(&out.outpoint, &out.script_pubkey),
             CoinLookup::Esplora { client, .. } => Ok(client
-                .get_output_status(&outpoint.txid, u64::from(outpoint.vout))?
+                .get_output_status(&out.outpoint.txid, u64::from(out.outpoint.vout))?
                 .map(|status| status.spent)),
         }
     }
@@ -1187,11 +1187,23 @@ impl CoinLookup {
             CoinLookup::Esplora { client, .. } => standing_of(client, out),
             // The node fetches the transaction before saying an output is
             // unspent, so a replaced payment already comes back as None.
-            CoinLookup::Node { node, .. } => match node.output_status(&out.outpoint) {
-                Ok(spent) => classify(out.height, spent),
-                Err(_) => Standing::Unchecked,
-            },
+            CoinLookup::Node { node, .. } => {
+                match node.output_status(&out.outpoint, &out.script_pubkey) {
+                    Ok(spent) => classify(out.height, spent),
+                    Err(_) => Standing::Unchecked,
+                }
+            }
         }
+    }
+
+    /// Whether "not found" from this source may delete a stored output.
+    ///
+    /// Not from a node. One node not knowing a transaction does not prove it
+    /// was replaced: it may be behind, pruned, or lying, and a row deleted on
+    /// its word is a payment this wallet stops showing. Such an output is
+    /// reported and kept. Esplora keeps the clean up it always had.
+    fn may_forget(&self) -> bool {
+        matches!(self, CoinLookup::Esplora { .. })
     }
 }
 
@@ -1266,15 +1278,19 @@ fn sp_balance(wallet_dir: &Path, lookups: &LookupFlags) -> Result<()> {
     let mut spendable = 0_u64;
     let mut stale = 0_usize;
     let mut forgotten = 0_usize;
+    let mut unknown_to_node = 0_usize;
     for out in &outputs {
         let standing = lookup.standing(out);
         // Never mined and the chain has never heard of it: a mempool match
         // whose transaction was replaced. Nothing revisits it otherwise, so it
         // would sit here inflating this list forever.
         if standing == Standing::Gone && out.height == spscan::UNCONFIRMED {
-            spstore::forget(&connection, out.outpoint)?;
-            forgotten += 1;
-            continue;
+            if lookup.may_forget() {
+                spstore::forget(&connection, out.outpoint)?;
+                forgotten += 1;
+                continue;
+            }
+            unknown_to_node += 1;
         }
         let seen = if out.height == spscan::UNCONFIRMED {
             String::new()
@@ -1296,6 +1312,13 @@ fn sp_balance(wallet_dir: &Path, lookups: &LookupFlags) -> Result<()> {
     println!("spendable: {spendable} sats");
     if forgotten > 0 {
         println!("forgot {forgotten} output(s) whose transaction was replaced before it was mined");
+    }
+    if unknown_to_node > 0 {
+        println!(
+            "{unknown_to_node} unconfirmed output(s) are unknown to {}; kept, not counted, \
+             until a scan settles them",
+            lookup.name()
+        );
     }
     if stale > 0 {
         println!(
@@ -1808,7 +1831,7 @@ fn prepare_sp_spend(
         // it owns should say so by name, not turn into a lookup.
         let coin = spspend::SpCoin::checked(out, &keys.spend)?;
         match lookup
-            .spent(out.outpoint)
+            .spent(out)
             .with_context(|| format!("asking {} about {}", lookup.name(), out.outpoint))?
         {
             // Esplora answers `None` both for a transaction it has never seen

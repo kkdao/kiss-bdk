@@ -248,18 +248,36 @@ impl Electrum {
 }
 
 impl Electrum {
+    /// Agree a protocol version, as the protocol asks a client to do first.
+    ///
+    /// 1.7 is where `blockchain.outpoint.get_status` is defined; a server that
+    /// tops out lower (rbitcoin is 1.4 to 1.6) can still answer it as an
+    /// extension, so the range is offered rather than 1.7 demanded.
+    pub fn negotiate(&mut self) -> Result<String> {
+        let reply = self.call("server.version", json!(["kiss-bdk", ["1.4", "1.7"]]))?;
+        let version = parse_version_reply(&reply).with_context(|| {
+            format!("the server's version reply {reply} is not a protocol between 1.4 and 1.7")
+        })?;
+        Ok(version.to_owned())
+    }
+
     /// Whether a stored output is spent, asked of the owner's own node.
     ///
-    /// `Ok(None)` only when the node says the transaction does not exist,
-    /// which is what lets a caller forget a replaced payment; any other
-    /// failure is an error, because forgetting a coin on a timeout or an
-    /// unsupported method would drop one that is still there.
+    /// `Ok(None)` only when the node says, in one of the two wordings servers
+    /// use for exactly this, that the transaction does not exist, or when the
+    /// output is past the end of the transaction it sent. Any other failure is
+    /// an error. Even `Ok(None)` is one node's word: callers report it and
+    /// keep the coin, never forget it.
     ///
     /// Two calls, because `blockchain.outpoint.get_status` answers an
     /// outpoint of a transaction it never saw the same as an unspent one on
     /// some servers (rbitcoin among them), and only fetching the transaction
-    /// tells those apart.
-    pub fn output_status(&mut self, outpoint: &OutPoint) -> Result<Option<bool>> {
+    /// tells those apart. `script` is passed as the 1.7 `spk_hint`.
+    pub fn output_status(
+        &mut self,
+        outpoint: &OutPoint,
+        script: &bdk_wallet::bitcoin::ScriptBuf,
+    ) -> Result<Option<bool>> {
         let txid = outpoint.txid.to_string();
         let tx = match self.call("blockchain.transaction.get", json!([txid, false])) {
             Ok(tx) => tx,
@@ -279,7 +297,7 @@ impl Electrum {
         }
         let status = self.call(
             "blockchain.outpoint.get_status",
-            json!([txid, outpoint.vout]),
+            json!([txid, outpoint.vout, script.to_hex_string()]),
         )?;
         parse_outpoint_status(&status)
             .with_context(|| format!("the server's status for {outpoint} says neither way"))
@@ -287,27 +305,82 @@ impl Electrum {
     }
 }
 
-/// Whether a server's refusal means the transaction is not known to it.
+/// Whether a server's refusal says the transaction is not known to it.
 ///
-/// Matched on the words rather than a code: Electrum servers do not agree on
-/// error codes for this, rbitcoin says "tx not found" and Fulcrum "No such
-/// mempool or blockchain transaction".
+/// Only the two wordings servers use for exactly this: rbitcoin's "tx not
+/// found" and the "No such mempool or blockchain transaction" Fulcrum and
+/// electrs pass on from bitcoind. Anything looser also catches "Method not
+/// found" and "No such table", which say nothing about the transaction.
 fn says_not_found(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
-    error.contains("not found") || error.contains("no such")
+    error.contains("tx not found") || error.contains("no such mempool or blockchain transaction")
 }
 
-/// `blockchain.outpoint.get_status` as either dialect returns it: rbitcoin's
-/// `{"spent": bool, ...}`, or protocol 1.6's `{"height": h}` when unspent with
-/// `spender_txhash` added once spent. `None` when it says neither.
+/// `blockchain.outpoint.get_status` in either form a server gives it, or
+/// `None` for anything malformed or self-contradicting.
+///
+/// * rbitcoin: `{"spent": bool}`, with `height` and `spending_txid` only
+///   when spent.
+/// * protocol 1.7: `{"funder_height": h}` while unspent, with
+///   `spender_txhash` (and `spender_height`) once spent.
+///
+/// A reply that says unspent while naming a spender, a height that is not a
+/// number, or one that matches neither form is refused rather than read as
+/// unspent: unspent is the answer that puts a coin into a transaction.
 pub fn parse_outpoint_status(status: &Value) -> Option<bool> {
-    if let Some(spent) = status.get("spent").and_then(Value::as_bool) {
+    let object = status.as_object()?;
+    // A field is either absent or of its type; null is neither, and the
+    // protocol omits a field rather than nulling it.
+    let txid_field = |key: &str| match object.get(key) {
+        None => Some(false),
+        Some(Value::String(hex)) if hex.len() == 64 && Txid::from_str(hex).is_ok() => Some(true),
+        Some(_) => None,
+    };
+    let number_field = |key: &str| match object.get(key) {
+        None => Some(false),
+        Some(value) if value.is_i64() || value.is_u64() => Some(true),
+        Some(_) => None,
+    };
+    let spending_txid = txid_field("spending_txid")?;
+    let spender_txhash = txid_field("spender_txhash")?;
+    let spender_height = number_field("spender_height")?;
+    number_field("height")?;
+
+    if let Some(spent) = object.get("spent") {
+        let spent = spent.as_bool()?;
+        // Any word of a spender beside "unspent" is a contradiction.
+        if !spent && (spending_txid || spender_txhash || spender_height) {
+            return None;
+        }
         return Some(spent);
     }
-    if status.get("spender_txhash").is_some_and(|v| !v.is_null()) {
-        return Some(true);
+    // 1.7: a funding height is what says the outpoint is known at all, and
+    // the spender's txid and height come together or not at all.
+    if !number_field("funder_height")? || spending_txid || spender_txhash != spender_height {
+        return None;
     }
-    status.get("height").map(|_| false)
+    Some(spender_txhash)
+}
+
+/// The protocol a `server.version` reply agreed, if it is one this client
+/// offered: `[server name, "1.x"]` or `"1.x.y"`, with 1.x from 1.4 to 1.7.
+pub fn parse_version_reply(reply: &Value) -> Option<&str> {
+    let [name, version] = reply.as_array()?.as_slice() else {
+        return None;
+    };
+    name.as_str()?;
+    let version = version.as_str()?;
+    let parts: Vec<u32> = version
+        .split('.')
+        .map(|part| {
+            (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| part.parse().ok())
+                .flatten()
+        })
+        .collect::<Option<_>>()?;
+    let in_range =
+        matches!(parts.as_slice(), [1, minor] | [1, minor, _] if (4..=7).contains(minor));
+    in_range.then_some(version)
 }
 
 /// What a server offers as proof that a transaction is in a block.

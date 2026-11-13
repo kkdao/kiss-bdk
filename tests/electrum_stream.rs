@@ -359,51 +359,126 @@ fn one_output_tx() -> (bdk_wallet::bitcoin::Transaction, String) {
 
 /// Whether a stored coin is spent, against each answer a server can give.
 #[test]
-fn a_coin_lookup_reads_both_dialects_and_never_guesses_gone() {
+fn a_coin_lookup_reads_both_dialects_and_refuses_anything_else() {
     use bdk_wallet::bitcoin::OutPoint;
 
     let (tx, hex) = one_output_tx();
     let ours = OutPoint::new(tx.compute_txid(), 0);
-    // (transaction.get reply, outpoint.get_status reply, expected)
-    let found = |hex: &str| format!("\"{hex}\"");
-    let cases: Vec<(String, String, Result<Option<bool>, ()>)> = vec![
+    let script = tx.output[0].script_pubkey.clone();
+    let spender = "0185a62484ca086b1a620552c770f852fb2303ff26f85849beb66f767da4e078";
+    let cases: Vec<(String, Option<bool>)> = vec![
         // rbitcoin's own shape
+        (r#"{"spent":false,"vout":0}"#.into(), Some(false)),
+        (r#"{"spent":true,"height":0}"#.into(), Some(true)),
         (
-            found(&hex),
-            r#"{"spent":false,"vout":0}"#.into(),
-            Ok(Some(false)),
+            format!(r#"{{"spent":true,"height":0,"spending_txid":"{spender}"}}"#),
+            Some(true),
+        ),
+        // protocol 1.7
+        (r#"{"funder_height":100}"#.into(), Some(false)),
+        (
+            format!(r#"{{"funder_height":100,"spender_txhash":"{spender}","spender_height":101}}"#),
+            Some(true),
+        ),
+        // malformed or self-contradicting: refused, never read as unspent
+        (r#"{}"#.into(), None),
+        (r#"{"height":null}"#.into(), None),
+        (r#"{"height":"broken"}"#.into(), None),
+        (r#"{"spent":"no"}"#.into(), None),
+        (
+            format!(r#"{{"spent":false,"spender_txhash":"{spender}","spender_height":101}}"#),
+            None,
         ),
         (
-            found(&hex),
-            r#"{"spent":true,"height":0}"#.into(),
-            Ok(Some(true)),
+            format!(r#"{{"spent":false,"spending_txid":"{spender}"}}"#),
+            None,
         ),
-        // protocol 1.6
-        (found(&hex), r#"{"height":100}"#.into(), Ok(Some(false))),
+        (r#"{"funder_height":"x"}"#.into(), None),
         (
-            found(&hex),
-            r#"{"height":100,"spender_txhash":"aa","spender_height":101}"#.into(),
-            Ok(Some(true)),
+            r#"{"funder_height":100,"spender_txhash":"not a txid"}"#.into(),
+            None,
         ),
-        // says neither: an error, never a guess
-        (found(&hex), r#"{}"#.into(), Err(())),
+        (r#"[]"#.into(), None),
+        // a spender half there: refused, not read as unspent
+        (r#"{"funder_height":100,"spender_height":101}"#.into(), None),
+        (
+            r#"{"funder_height":100,"spender_txhash":null,"spender_height":101}"#.into(),
+            None,
+        ),
+        (r#"{"spent":false,"spender_height":101}"#.into(), None),
+        (
+            format!(r#"{{"funder_height":100,"spender_txhash":"{spender}"}}"#),
+            None,
+        ),
+        (
+            format!(r#"{{"funder_height":100,"spending_txid":"{spender}"}}"#),
+            None,
+        ),
+        (r#"{"spent":true,"spending_txid":null}"#.into(), None),
     ];
-    for (tx_reply, status_reply, want) in cases {
-        let (tx_reply, status_reply) = (tx_reply.clone(), status_reply.clone());
+    for (status_reply, want) in cases {
+        let tx_reply = format!("\"{hex}\"");
+        let reply = status_reply.clone();
         let address = serve(move |method, id| match method {
             "blockchain.transaction.get" => vec![result(id, &tx_reply)],
-            "blockchain.outpoint.get_status" => vec![result(id, &status_reply)],
+            "blockchain.outpoint.get_status" => vec![result(id, &reply)],
             _ => Vec::new(),
         });
-        let got = Electrum::connect(&address).unwrap().output_status(&ours);
+        let got = Electrum::connect(&address)
+            .unwrap()
+            .output_status(&ours, &script);
         match want {
-            Ok(want) => assert_eq!(got.unwrap(), want),
-            Err(()) => assert!(
-                got.is_err(),
-                "a status saying neither way was read as {got:?}"
-            ),
+            Some(want) => assert_eq!(got.unwrap(), Some(want), "{status_reply}"),
+            None => assert!(got.is_err(), "{status_reply} was read as {got:?}"),
         }
     }
+}
+
+/// The status request carries the 1.7 spk_hint, and the version handshake
+/// reads the protocol the server picked.
+#[test]
+fn the_status_request_carries_the_script_and_the_version_is_agreed() {
+    use bdk_wallet::bitcoin::OutPoint;
+    use std::io::{BufRead, BufReader, Write};
+
+    let (tx, hex) = one_output_tx();
+    let script = tx.output[0].script_pubkey.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let (sent_tx, sent) = mpsc::channel();
+    thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let mut writer = socket.try_clone().unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            sent_tx.send(request.clone()).unwrap();
+            let id = request["id"].as_u64().unwrap();
+            let reply = match request["method"].as_str().unwrap() {
+                "server.version" => r#"["rbitcoin 0.5", "1.6"]"#.to_string(),
+                "blockchain.transaction.get" => format!("\"{hex}\""),
+                _ => r#"{"spent":false}"#.to_string(),
+            };
+            writeln!(writer, "{}", result(id, &reply)).unwrap();
+            line.clear();
+        }
+    });
+
+    let mut node = Electrum::connect(&address).unwrap();
+    assert_eq!(node.negotiate().unwrap(), "1.6");
+    node.output_status(&OutPoint::new(tx.compute_txid(), 0), &script)
+        .unwrap();
+    let requests: Vec<Value> = sent.try_iter().collect();
+    assert_eq!(requests[0]["method"], "server.version");
+    assert_eq!(requests[0]["params"][1], serde_json::json!(["1.4", "1.7"]));
+    let status = requests
+        .iter()
+        .find(|r| r["method"] == "blockchain.outpoint.get_status")
+        .unwrap();
+    assert_eq!(status["params"][0], tx.compute_txid().to_string());
+    assert_eq!(status["params"][1], 0);
+    assert_eq!(status["params"][2], script.to_hex_string());
 }
 
 #[test]
@@ -411,12 +486,13 @@ fn a_coin_is_only_gone_when_its_transaction_is() {
     use bdk_wallet::bitcoin::OutPoint;
 
     let (tx, hex) = one_output_tx();
+    let script = tx.output[0].script_pubkey.clone();
     let refusal = |id: u64, message: &str| {
         format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32600,"message":"{message}"}}}}"#)
     };
 
-    // rbitcoin and Fulcrum wording for an unknown transaction: gone, and the
-    // outpoint is not asked about at all.
+    // The two wordings for an unknown transaction: gone, and the outpoint is
+    // not asked about at all.
     for message in ["tx not found", "No such mempool or blockchain transaction"] {
         let (asked_tx, asked) = mpsc::channel();
         let address = serve(move |method, id| {
@@ -425,7 +501,7 @@ fn a_coin_is_only_gone_when_its_transaction_is() {
         });
         let got = Electrum::connect(&address)
             .unwrap()
-            .output_status(&OutPoint::new(tx.compute_txid(), 0));
+            .output_status(&OutPoint::new(tx.compute_txid(), 0), &script);
         assert_eq!(got.unwrap(), None, "{message}");
         assert_eq!(
             asked.try_iter().collect::<Vec<_>>(),
@@ -433,15 +509,18 @@ fn a_coin_is_only_gone_when_its_transaction_is() {
         );
     }
 
-    // Any other refusal is an error, so the caller marks the coin unverified
-    // instead of forgetting it.
-    let address = serve(move |_, id| vec![refusal(id, "server busy")]);
-    assert!(
-        Electrum::connect(&address)
-            .unwrap()
-            .output_status(&OutPoint::new(tx.compute_txid(), 0))
-            .is_err()
-    );
+    // Refusals that say nothing about the transaction are errors, so the
+    // caller marks the coin unverified instead of treating it as gone.
+    for message in ["Method not found", "No such database table", "server busy"] {
+        let address = serve(move |_, id| vec![refusal(id, message)]);
+        assert!(
+            Electrum::connect(&address)
+                .unwrap()
+                .output_status(&OutPoint::new(tx.compute_txid(), 0), &script)
+                .is_err(),
+            "{message} was read as not found"
+        );
+    }
 
     // An output past the end of a transaction that exists: gone.
     let hex2 = hex.clone();
@@ -449,7 +528,7 @@ fn a_coin_is_only_gone_when_its_transaction_is() {
     assert_eq!(
         Electrum::connect(&address)
             .unwrap()
-            .output_status(&OutPoint::new(tx.compute_txid(), 5))
+            .output_status(&OutPoint::new(tx.compute_txid(), 5), &script)
             .unwrap(),
         None
     );
@@ -465,7 +544,39 @@ fn a_coin_is_only_gone_when_its_transaction_is() {
     assert!(
         Electrum::connect(&address)
             .unwrap()
-            .output_status(&other)
+            .output_status(&other, &script)
             .is_err()
     );
+}
+
+/// A version reply outside what was offered, or not shaped like one, stops
+/// the lookup before anything is asked.
+#[test]
+fn a_version_reply_outside_the_offer_is_refused() {
+    for reply in [
+        r#"["server", "9.0"]"#,
+        r#"[null, "garbage"]"#,
+        r#"["server", "1.3"]"#,
+        r#"["server", "1.8"]"#,
+        r#"["server", "1."]"#,
+        r#"["server"]"#,
+        r#""1.6""#,
+    ] {
+        let address = serve(move |_, id| vec![result(id, reply)]);
+        assert!(
+            Electrum::connect(&address).unwrap().negotiate().is_err(),
+            "{reply} was accepted"
+        );
+    }
+    for (reply, agreed) in [
+        (r#"["rbitcoin 0.5", "1.6"]"#, "1.6"),
+        (r#"["Fulcrum 2.0", "1.7"]"#, "1.7"),
+        (r#"["electrs", "1.4.2"]"#, "1.4.2"),
+    ] {
+        let address = serve(move |_, id| vec![result(id, reply)]);
+        assert_eq!(
+            Electrum::connect(&address).unwrap().negotiate().unwrap(),
+            agreed
+        );
+    }
 }
