@@ -11,7 +11,9 @@ use bdk_esplora::esplora_client::{BlockingClient, Builder};
 use bdk_wallet::bitcoin::address::NetworkUnchecked;
 use bdk_wallet::bitcoin::bip32::KeySource;
 use bdk_wallet::bitcoin::secp256k1::PublicKey;
-use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, Psbt, Sequence, absolute, constants};
+use bdk_wallet::bitcoin::{
+    Address, Amount, FeeRate, Network, OutPoint, Psbt, Sequence, absolute, constants,
+};
 use bdk_wallet::coin_selection::LargestFirstCoinSelection;
 use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
@@ -267,6 +269,17 @@ enum Command {
         #[arg(long)]
         from_sp: bool,
 
+        /// With --from-sp: ask this Electrum node, your own, which of the
+        /// stored silent payments are spent. Defaults to the node the last
+        /// `sp-scan --electrum` used.
+        #[arg(long, value_name = "HOST:PORT", requires = "from_sp")]
+        electrum: Option<String>,
+
+        /// With --from-sp: ask the Esplora backend instead, even when a node
+        /// is known. It then learns every silent payment coin this wallet holds.
+        #[arg(long, requires = "from_sp", conflicts_with = "electrum")]
+        esplora_lookups: bool,
+
         /// nLockTime as a block height. Defaults to the current tip, which
         /// BDK sets so the transaction looks like any other wallet's (anti fee
         /// sniping). 0 leaves it unset, for a signer that reads a test
@@ -341,7 +354,17 @@ enum Command {
     },
 
     /// Show the silent payment outputs found so far.
-    SpBalance,
+    SpBalance {
+        /// Ask this Electrum node, your own, which outputs are spent.
+        /// Defaults to the node the last `sp-scan --electrum` used.
+        #[arg(long, value_name = "HOST:PORT")]
+        electrum: Option<String>,
+
+        /// Ask the Esplora backend instead, even when a node is known. It then
+        /// learns every silent payment coin this wallet holds.
+        #[arg(long, conflicts_with = "electrum")]
+        esplora_lookups: bool,
+    },
 
     /// Inspect a binary or base64 PSBT without broadcasting it.
     Inspect {
@@ -416,6 +439,8 @@ fn main() -> Result<()> {
             qr,
             animated,
             from_sp,
+            electrum,
+            esplora_lookups,
             locktime,
         } => create_psbt(
             &cli.wallet_dir,
@@ -429,6 +454,10 @@ fn main() -> Result<()> {
                 (true, true) => Some(QrStyle::Animated),
             },
             from_sp,
+            &LookupFlags {
+                electrum,
+                esplora: esplora_lookups,
+            },
             locktime,
         ),
         Command::Scan {
@@ -452,7 +481,16 @@ fn main() -> Result<()> {
             Some(txid) => sp_scan_tx(&cli.wallet_dir, &txid),
             None => sp_scan(&cli.wallet_dir, from, blindbit, electrum),
         },
-        Command::SpBalance => sp_balance(&cli.wallet_dir),
+        Command::SpBalance {
+            electrum,
+            esplora_lookups,
+        } => sp_balance(
+            &cli.wallet_dir,
+            &LookupFlags {
+                electrum,
+                esplora: esplora_lookups,
+            },
+        ),
         Command::Inspect { psbt } => inspect_psbt(&psbt),
         Command::Broadcast {
             psbt,
@@ -893,6 +931,9 @@ fn sp_scan_electrum(wallet_dir: &Path, from: Option<u32>, address: &str) -> Resu
     match last {
         Some(height) => {
             println!("scanned to {height}; {total} silent payment output(s) in range");
+            // The node that just proved every match is the one later lookups
+            // about these coins should ask, rather than a public backend.
+            spstore::set_node(&connection, address)?;
             Ok(())
         }
         // The stream ended without delivering the height it was asked for.
@@ -1027,6 +1068,133 @@ fn standing_of(client: &BlockingClient, out: &spstore::StoredOut) -> Standing {
     }
 }
 
+/// Flags that pick where coin lookups go.
+struct LookupFlags {
+    electrum: Option<String>,
+    esplora: bool,
+}
+
+/// Where the lookups about stored silent payment coins go.
+///
+/// Every such lookup names one of this wallet's coins, so whoever answers it
+/// learns that the coin is ours. The owner's node found those coins in the
+/// first place and learns nothing new; a public Esplora learns all of them.
+enum CoinLookup {
+    Node {
+        address: String,
+        node: electrum::Electrum,
+    },
+    Esplora {
+        url: String,
+        client: BlockingClient,
+    },
+}
+
+/// Which source to ask, decided before anything is contacted.
+#[derive(Debug, PartialEq, Eq)]
+enum LookupChoice {
+    Node(String),
+    Esplora,
+}
+
+/// A node named on the command line wins, then the one the last Electrum scan
+/// used; Esplora only when asked for or when no node has ever been used.
+fn choose_lookup(
+    flag: Option<&str>,
+    remembered: Option<&str>,
+    force_esplora: bool,
+) -> LookupChoice {
+    if force_esplora {
+        return LookupChoice::Esplora;
+    }
+    match flag.or(remembered) {
+        Some(address) => LookupChoice::Node(address.to_owned()),
+        None => LookupChoice::Esplora,
+    }
+}
+
+fn coin_lookup(
+    connection: &Connection,
+    config: &Config,
+    chain: Chain,
+    flags: &LookupFlags,
+    coins: usize,
+) -> Result<CoinLookup> {
+    let remembered = spstore::node(connection)?;
+    match choose_lookup(
+        flags.electrum.as_deref(),
+        remembered.as_deref(),
+        flags.esplora,
+    ) {
+        LookupChoice::Node(address) => {
+            // Never a silent fall back to Esplora: that would hand it the very
+            // list this exists to keep from it.
+            let mut node = electrum::Electrum::connect(&address).with_context(|| {
+                format!(
+                    "could not reach your node at {address}; pass --electrum HOST:PORT \
+                     for another, or --esplora-lookups to ask {} (it then learns which \
+                     coins are yours)",
+                    config.esplora
+                )
+            })?;
+            let expected = constants::genesis_block(chain.network()).block_hash();
+            let genesis = node.genesis_hash()?;
+            if genesis != expected {
+                bail!(
+                    "the node at {address} is on the chain whose genesis is {genesis}, \
+                     but this wallet is on {} ({expected})",
+                    chain.label()
+                );
+            }
+            Ok(CoinLookup::Node { address, node })
+        }
+        LookupChoice::Esplora => {
+            if coins > 0 {
+                println!(
+                    "note: asking {} about {coins} silent payment coin(s) tells it they \
+                     are yours; sp-scan --electrum remembers your own node for this",
+                    config.esplora
+                );
+            }
+            Ok(CoinLookup::Esplora {
+                url: config.esplora.clone(),
+                client: esplora(config),
+            })
+        }
+    }
+}
+
+impl CoinLookup {
+    fn name(&self) -> &str {
+        match self {
+            CoinLookup::Node { address, .. } => address,
+            CoinLookup::Esplora { url, .. } => url,
+        }
+    }
+
+    /// `Ok(None)` when the source says the output does not exist.
+    fn spent(&mut self, outpoint: OutPoint) -> Result<Option<bool>> {
+        match self {
+            CoinLookup::Node { node, .. } => node.output_status(&outpoint),
+            CoinLookup::Esplora { client, .. } => Ok(client
+                .get_output_status(&outpoint.txid, u64::from(outpoint.vout))?
+                .map(|status| status.spent)),
+        }
+    }
+
+    fn standing(&mut self, out: &spstore::StoredOut) -> Standing {
+        match self {
+            CoinLookup::Esplora { client, .. } => standing_of(client, out),
+            // The node fetches the transaction before saying an output is
+            // unspent, so a replaced payment already comes back as None.
+            CoinLookup::Node { node, .. } => match node.output_status(&out.outpoint) {
+                Ok(spent) => classify(out.height, spent),
+                Err(_) => Standing::Unchecked,
+            },
+        }
+    }
+}
+
 /// How far back a scan will rewind when the chain disagrees with the watermark.
 ///
 /// Deep enough for any reorg a test network realistically produces, shallow
@@ -1082,7 +1250,7 @@ fn resume_from(
     }
 }
 
-fn sp_balance(wallet_dir: &Path) -> Result<()> {
+fn sp_balance(wallet_dir: &Path, lookups: &LookupFlags) -> Result<()> {
     let (config, chain) = load_config(wallet_dir)?;
     let (mut connection, _wallet) = open_wallet(wallet_dir, &config, chain)?;
     spstore::migrate(&mut connection)?;
@@ -1094,12 +1262,12 @@ fn sp_balance(wallet_dir: &Path) -> Result<()> {
         None => println!("scanned to: never (run sp-scan)"),
     }
 
-    let client = esplora(&config);
+    let mut lookup = coin_lookup(&connection, &config, chain, lookups, outputs.len())?;
     let mut spendable = 0_u64;
     let mut stale = 0_usize;
     let mut forgotten = 0_usize;
     for out in &outputs {
-        let standing = standing_of(&client, out);
+        let standing = lookup.standing(out);
         // Never mined and the chain has never heard of it: a mempool match
         // whose transaction was replaced. Nothing revisits it otherwise, so it
         // would sit here inflating this list forever.
@@ -1366,6 +1534,7 @@ fn create_psbt(
     out: &Path,
     qr: Option<QrStyle>,
     from_sp: bool,
+    lookups: &LookupFlags,
     locktime: Option<u32>,
 ) -> Result<()> {
     if sats == 0 {
@@ -1406,6 +1575,8 @@ fn create_psbt(
         Some(prepare_sp_spend(
             &connection,
             &config,
+            chain,
+            lookups,
             Amount::from_sat(sats),
             fee_rate,
         )?)
@@ -1613,6 +1784,8 @@ struct SpSpend {
 fn prepare_sp_spend(
     connection: &Connection,
     config: &Config,
+    chain: Chain,
+    lookups: &LookupFlags,
     target: Amount,
     fee_rate: FeeRate,
 ) -> Result<SpSpend> {
@@ -1626,7 +1799,7 @@ fn prepare_sp_spend(
         );
     }
 
-    let client = esplora(config);
+    let mut lookup = coin_lookup(connection, config, chain, lookups, stored.len())?;
     let mut candidates = Vec::new();
     let mut spent = 0_usize;
     let mut missing = 0_usize;
@@ -1634,16 +1807,16 @@ fn prepare_sp_spend(
         // Re-derive before asking the network: a coin this wallet cannot prove
         // it owns should say so by name, not turn into a lookup.
         let coin = spspend::SpCoin::checked(out, &keys.spend)?;
-        match client
-            .get_output_status(&out.outpoint.txid, u64::from(out.outpoint.vout))
-            .with_context(|| format!("asking Esplora about {}", out.outpoint))?
+        match lookup
+            .spent(out.outpoint)
+            .with_context(|| format!("asking {} about {}", lookup.name(), out.outpoint))?
         {
             // Esplora answers `None` both for a transaction it has never seen
             // and for a vout past the end of one it has, so this covers a
             // funding transaction reorged out from under a stored row --
             // sp-scan's watermark only walks forward and would never notice.
             None => missing += 1,
-            Some(status) if status.spent => spent += 1,
+            Some(true) => spent += 1,
             Some(_) => candidates.push(coin),
         }
     }
@@ -1654,7 +1827,7 @@ fn prepare_sp_spend(
         println!(
             "skipping {missing} silent payment(s) {} no longer knows about; \
              their funding transaction may have been reorged out",
-            config.esplora
+            lookup.name()
         );
     }
 
@@ -2090,6 +2263,27 @@ fn print_transaction_summary(psbt: &Psbt, network: Network) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coin_lookups_go_to_the_node_and_never_fall_back_on_their_own() {
+        // Nothing named, nothing remembered: Esplora, which the command says.
+        assert_eq!(choose_lookup(None, None, false), LookupChoice::Esplora);
+        // A node from the last Electrum scan is used without being asked for.
+        assert_eq!(
+            choose_lookup(None, Some("127.0.0.1:50001"), false),
+            LookupChoice::Node("127.0.0.1:50001".into())
+        );
+        // One named on the command line wins over the remembered one.
+        assert_eq!(
+            choose_lookup(Some("10.0.0.2:50001"), Some("127.0.0.1:50001"), false),
+            LookupChoice::Node("10.0.0.2:50001".into())
+        );
+        // Esplora only when asked for by name.
+        assert_eq!(
+            choose_lookup(None, Some("127.0.0.1:50001"), true),
+            LookupChoice::Esplora
+        );
+    }
 
     #[test]
     fn accepts_only_kiss_visible_sd_filenames() {

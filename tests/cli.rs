@@ -305,3 +305,164 @@ fn spending_silent_payments_says_to_scan_before_it_reaches_the_network() {
     assert!(!ok, "no silent payments have been found yet");
     assert!(stderr.contains("sp-scan"), "{stderr}");
 }
+
+/// The default signet genesis, which the fake node below says it is on.
+const SIGNET_GENESIS: &str = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6";
+
+/// A port that counts every connection made to it and answers none.
+fn counting_listener() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            seen.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    (url, hits)
+}
+
+/// One Electrum connection that knows one transaction, unspent.
+fn fake_node(tx_hex: String) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let Ok((socket, _)) = listener.accept() else {
+            return;
+        };
+        let mut writer = socket.try_clone().unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let id = request["id"].as_u64().unwrap();
+            let result = match request["method"].as_str().unwrap() {
+                "server.features" => serde_json::json!({ "genesis_hash": SIGNET_GENESIS }),
+                "blockchain.transaction.get" => serde_json::json!(tx_hex),
+                "blockchain.outpoint.get_status" => serde_json::json!({ "spent": false }),
+                _ => serde_json::Value::Null,
+            };
+            let reply = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+            if writeln!(writer, "{reply}").is_err() {
+                return;
+            }
+            line.clear();
+        }
+    });
+    address
+}
+
+/// A wallet holding one found silent payment, with `node` remembered as the
+/// owner's Electrum node, and Esplora pointed at `esplora`.
+fn wallet_with_a_coin(wallet_dir: &Path, esplora: &str, node: &str) -> String {
+    use bdk_wallet::bitcoin::consensus::encode::serialize_hex;
+    use bdk_wallet::bitcoin::secp256k1::SecretKey;
+    use bdk_wallet::bitcoin::{
+        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, absolute,
+        transaction,
+    };
+    let (ok, _, stderr) = run(
+        wallet_dir,
+        &[
+            "init",
+            "--network",
+            "signet",
+            "--descriptor",
+            PUBLIC_TEST_DESCRIPTOR,
+            "--esplora",
+            esplora,
+        ],
+    );
+    assert!(ok, "init failed: {stderr}");
+    let tx = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(21_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x20, 0x01]),
+        }],
+    };
+    let mut connection =
+        bdk_wallet::rusqlite::Connection::open(wallet_dir.join("wallet.sqlite")).unwrap();
+    kiss_bdk::spstore::migrate(&mut connection).unwrap();
+    kiss_bdk::spstore::put_found(
+        &mut connection,
+        &[kiss_bdk::spscan::Found {
+            height: 100,
+            out: bdk_sp::receive::SpOut {
+                outpoint: OutPoint::new(tx.compute_txid(), 0),
+                tweak: SecretKey::from_slice(&[0x33; 32]).unwrap(),
+                script_pubkey: tx.output[0].script_pubkey.clone(),
+                amount: tx.output[0].value,
+                label: None,
+            },
+        }],
+    )
+    .unwrap();
+    kiss_bdk::spstore::set_node(&connection, node).unwrap();
+    serialize_hex(&tx)
+}
+
+/// The privacy property, through the real command: with a node remembered,
+/// sp-balance asks it about the coin and makes no request to Esplora at all.
+#[test]
+fn sp_balance_asks_the_remembered_node_and_never_esplora() {
+    use std::sync::atomic::Ordering;
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    let (esplora, hits) = counting_listener();
+
+    // The node's address is only known once it is listening, and the coin's
+    // transaction only once the wallet holds it, so the wallet is built first
+    // with a placeholder node and then pointed at the real one.
+    let tx_hex = wallet_with_a_coin(&wallet_dir, &esplora, "127.0.0.1:1");
+    let node = fake_node(tx_hex);
+    let connection =
+        bdk_wallet::rusqlite::Connection::open(wallet_dir.join("wallet.sqlite")).unwrap();
+    kiss_bdk::spstore::set_node(&connection, &node).unwrap();
+    drop(connection);
+
+    let (ok, stdout, stderr) = run(&wallet_dir, &["sp-balance"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("21000 sats at"), "{stdout}");
+    assert!(stdout.contains("(spendable, block 100)"), "{stdout}");
+    assert!(stdout.contains("spendable: 21000 sats"), "{stdout}");
+    assert!(!stdout.contains("note: asking"), "{stdout}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "Esplora was contacted");
+
+    // The control: the same wallet told to ask Esplora does contact it, so the
+    // zero above is the command keeping quiet, not a listener that hears nothing.
+    let (_, stdout, _) = run(&wallet_dir, &["sp-balance", "--esplora-lookups"]);
+    assert!(stdout.contains("note: asking"), "{stdout}");
+    assert!(
+        hits.load(Ordering::SeqCst) > 0,
+        "the listener never heard the control"
+    );
+}
+
+/// A remembered node that cannot be reached stops the command instead of
+/// quietly asking Esplora.
+#[test]
+fn an_unreachable_node_is_an_error_not_a_quiet_fallback() {
+    use std::sync::atomic::Ordering;
+    let tmp = tempfile::tempdir().unwrap();
+    let wallet_dir = tmp.path().join("wallet");
+    let (esplora, hits) = counting_listener();
+    wallet_with_a_coin(&wallet_dir, &esplora, "127.0.0.1:1");
+
+    let (ok, _, stderr) = run(&wallet_dir, &["sp-balance"]);
+    assert!(!ok, "an unreachable node was not reported");
+    assert!(stderr.contains("--esplora-lookups"), "{stderr}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "fell back to Esplora");
+}

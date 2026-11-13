@@ -121,6 +121,14 @@ the transaction bytes the branch ties to that header. Esplora is asked for one
 block hash per height, and a hash that disagrees stops the scan at that height
 whether or not anything was found there.
 
+The same goes for what happens to those coins afterwards. `sp-balance` and
+`create --from-sp` ask, for every stored output, whether it is spent and
+whether its transaction still exists, and each question names one of your
+coins. They ask the node the last `sp-scan --electrum` used, or the one given
+with `--electrum`, and only ask Esplora when no node has been used or when
+told to with `--esplora-lookups`, saying so when they do. A node that cannot be
+reached stops the command rather than handing the list to Esplora.
+
 Two limits follow. The Electrum server learns which transactions paid you,
 because it is asked to prove them, so it has to be a node you run yourself.
 And the proof rests on the two sources agreeing: an Electrum server and an

@@ -331,3 +331,141 @@ fn a_match_is_proven_over_the_same_server() {
         ]
     );
 }
+
+/// A transaction with one output, the stored coin at vout 0, as hex.
+fn one_output_tx() -> (bdk_wallet::bitcoin::Transaction, String) {
+    use bdk_wallet::bitcoin::consensus::encode::serialize_hex;
+    use bdk_wallet::bitcoin::{
+        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, absolute,
+        transaction,
+    };
+    let tx = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(21_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x20, 0x01]),
+        }],
+    };
+    let hex = serialize_hex(&tx);
+    (tx, hex)
+}
+
+/// Whether a stored coin is spent, against each answer a server can give.
+#[test]
+fn a_coin_lookup_reads_both_dialects_and_never_guesses_gone() {
+    use bdk_wallet::bitcoin::OutPoint;
+
+    let (tx, hex) = one_output_tx();
+    let ours = OutPoint::new(tx.compute_txid(), 0);
+    // (transaction.get reply, outpoint.get_status reply, expected)
+    let found = |hex: &str| format!("\"{hex}\"");
+    let cases: Vec<(String, String, Result<Option<bool>, ()>)> = vec![
+        // rbitcoin's own shape
+        (
+            found(&hex),
+            r#"{"spent":false,"vout":0}"#.into(),
+            Ok(Some(false)),
+        ),
+        (
+            found(&hex),
+            r#"{"spent":true,"height":0}"#.into(),
+            Ok(Some(true)),
+        ),
+        // protocol 1.6
+        (found(&hex), r#"{"height":100}"#.into(), Ok(Some(false))),
+        (
+            found(&hex),
+            r#"{"height":100,"spender_txhash":"aa","spender_height":101}"#.into(),
+            Ok(Some(true)),
+        ),
+        // says neither: an error, never a guess
+        (found(&hex), r#"{}"#.into(), Err(())),
+    ];
+    for (tx_reply, status_reply, want) in cases {
+        let (tx_reply, status_reply) = (tx_reply.clone(), status_reply.clone());
+        let address = serve(move |method, id| match method {
+            "blockchain.transaction.get" => vec![result(id, &tx_reply)],
+            "blockchain.outpoint.get_status" => vec![result(id, &status_reply)],
+            _ => Vec::new(),
+        });
+        let got = Electrum::connect(&address).unwrap().output_status(&ours);
+        match want {
+            Ok(want) => assert_eq!(got.unwrap(), want),
+            Err(()) => assert!(
+                got.is_err(),
+                "a status saying neither way was read as {got:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn a_coin_is_only_gone_when_its_transaction_is() {
+    use bdk_wallet::bitcoin::OutPoint;
+
+    let (tx, hex) = one_output_tx();
+    let refusal = |id: u64, message: &str| {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32600,"message":"{message}"}}}}"#)
+    };
+
+    // rbitcoin and Fulcrum wording for an unknown transaction: gone, and the
+    // outpoint is not asked about at all.
+    for message in ["tx not found", "No such mempool or blockchain transaction"] {
+        let (asked_tx, asked) = mpsc::channel();
+        let address = serve(move |method, id| {
+            asked_tx.send(method.to_string()).unwrap();
+            vec![refusal(id, message)]
+        });
+        let got = Electrum::connect(&address)
+            .unwrap()
+            .output_status(&OutPoint::new(tx.compute_txid(), 0));
+        assert_eq!(got.unwrap(), None, "{message}");
+        assert_eq!(
+            asked.try_iter().collect::<Vec<_>>(),
+            ["blockchain.transaction.get"]
+        );
+    }
+
+    // Any other refusal is an error, so the caller marks the coin unverified
+    // instead of forgetting it.
+    let address = serve(move |_, id| vec![refusal(id, "server busy")]);
+    assert!(
+        Electrum::connect(&address)
+            .unwrap()
+            .output_status(&OutPoint::new(tx.compute_txid(), 0))
+            .is_err()
+    );
+
+    // An output past the end of a transaction that exists: gone.
+    let hex2 = hex.clone();
+    let address = serve(move |_, id| vec![result(id, &format!("\"{hex2}\""))]);
+    assert_eq!(
+        Electrum::connect(&address)
+            .unwrap()
+            .output_status(&OutPoint::new(tx.compute_txid(), 5))
+            .unwrap(),
+        None
+    );
+
+    // A server answering with some other transaction is refused.
+    let address = serve(move |_, id| vec![result(id, &format!("\"{hex}\""))]);
+    let other = OutPoint::new(
+        "0185a62484ca086b1a620552c770f852fb2303ff26f85849beb66f767da4e078"
+            .parse()
+            .unwrap(),
+        0,
+    );
+    assert!(
+        Electrum::connect(&address)
+            .unwrap()
+            .output_status(&other)
+            .is_err()
+    );
+}

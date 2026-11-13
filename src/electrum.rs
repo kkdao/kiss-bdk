@@ -61,7 +61,7 @@ use bdk_wallet::bitcoin::block::Header;
 use bdk_wallet::bitcoin::consensus::deserialize;
 use bdk_wallet::bitcoin::hashes::{Hash, sha256d};
 use bdk_wallet::bitcoin::secp256k1::{PublicKey, XOnlyPublicKey};
-use bdk_wallet::bitcoin::{Amount, BlockHash, Transaction, TxMerkleNode, Txid};
+use bdk_wallet::bitcoin::{Amount, BlockHash, OutPoint, Transaction, TxMerkleNode, Txid};
 use serde_json::{Value, json};
 
 use crate::spreceive::ScanKeys;
@@ -245,6 +245,69 @@ impl Electrum {
         }
         String::from_utf8(buffer).context("the tweak server sent a line that is not UTF-8")
     }
+}
+
+impl Electrum {
+    /// Whether a stored output is spent, asked of the owner's own node.
+    ///
+    /// `Ok(None)` only when the node says the transaction does not exist,
+    /// which is what lets a caller forget a replaced payment; any other
+    /// failure is an error, because forgetting a coin on a timeout or an
+    /// unsupported method would drop one that is still there.
+    ///
+    /// Two calls, because `blockchain.outpoint.get_status` answers an
+    /// outpoint of a transaction it never saw the same as an unspent one on
+    /// some servers (rbitcoin among them), and only fetching the transaction
+    /// tells those apart.
+    pub fn output_status(&mut self, outpoint: &OutPoint) -> Result<Option<bool>> {
+        let txid = outpoint.txid.to_string();
+        let tx = match self.call("blockchain.transaction.get", json!([txid, false])) {
+            Ok(tx) => tx,
+            Err(error) if says_not_found(&format!("{error:#}")) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let raw = tx
+            .as_str()
+            .context("the server sent a transaction that is not a hex string")?;
+        let tx: Transaction = deserialize(&decode_hex(raw)?)
+            .with_context(|| format!("the server's copy of {txid} does not parse"))?;
+        if tx.compute_txid() != outpoint.txid {
+            bail!("the server sent another transaction when asked for {txid}");
+        }
+        if outpoint.vout as usize >= tx.output.len() {
+            return Ok(None);
+        }
+        let status = self.call(
+            "blockchain.outpoint.get_status",
+            json!([txid, outpoint.vout]),
+        )?;
+        parse_outpoint_status(&status)
+            .with_context(|| format!("the server's status for {outpoint} says neither way"))
+            .map(Some)
+    }
+}
+
+/// Whether a server's refusal means the transaction is not known to it.
+///
+/// Matched on the words rather than a code: Electrum servers do not agree on
+/// error codes for this, rbitcoin says "tx not found" and Fulcrum "No such
+/// mempool or blockchain transaction".
+fn says_not_found(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("not found") || error.contains("no such")
+}
+
+/// `blockchain.outpoint.get_status` as either dialect returns it: rbitcoin's
+/// `{"spent": bool, ...}`, or protocol 1.6's `{"height": h}` when unspent with
+/// `spender_txhash` added once spent. `None` when it says neither.
+pub fn parse_outpoint_status(status: &Value) -> Option<bool> {
+    if let Some(spent) = status.get("spent").and_then(Value::as_bool) {
+        return Some(spent);
+    }
+    if status.get("spender_txhash").is_some_and(|v| !v.is_null()) {
+        return Some(true);
+    }
+    status.get("height").map(|_| false)
 }
 
 /// What a server offers as proof that a transaction is in a block.

@@ -54,10 +54,23 @@ CREATE TABLE kiss_sp_watermark ( \
 /// reason to re-check rather than to refuse.
 const SCHEMA_V1: &str = "ALTER TABLE kiss_sp_watermark ADD COLUMN hash TEXT;";
 
+/// The owner's own Electrum node, as the last successful `sp-scan --electrum`
+/// reached it.
+///
+/// Remembered so that the lookups made later about the coins it found, which
+/// are spent and which still exist, go to that node by default. Asking a public
+/// backend about each stored output tells it exactly which coins are this
+/// wallet's.
+const SCHEMA_V2: &str = "\
+CREATE TABLE kiss_sp_node ( \
+    id INTEGER PRIMARY KEY CHECK (id = 0), \
+    electrum TEXT NOT NULL \
+) STRICT;";
+
 /// Create the tables if they are not there yet. Safe to call on every open.
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction()?;
-    migrate_schema(&tx, SCHEMA_NAME, &[SCHEMA_V0, SCHEMA_V1])
+    migrate_schema(&tx, SCHEMA_NAME, &[SCHEMA_V0, SCHEMA_V1, SCHEMA_V2])
         .context("creating silent payment tables")?;
     tx.commit()?;
     Ok(())
@@ -273,6 +286,30 @@ pub fn forget_from(connection: &Connection, height: u32) -> Result<usize> {
     Ok(removed)
 }
 
+/// The Electrum node coin lookups should go to, if one has been used.
+pub fn node(connection: &Connection) -> Result<Option<String>> {
+    connection
+        .query_row(
+            "SELECT electrum FROM kiss_sp_node WHERE id = 0",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reading the remembered Electrum node")
+}
+
+/// Remember `address` as the owner's node, replacing any earlier one.
+pub fn set_node(connection: &Connection, address: &str) -> Result<()> {
+    connection
+        .execute(
+            "INSERT INTO kiss_sp_node (id, electrum) VALUES (0, ?1) \
+             ON CONFLICT(id) DO UPDATE SET electrum = ?1",
+            params![address],
+        )
+        .context("remembering the Electrum node")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +321,22 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         migrate(&mut connection).unwrap();
         connection
+    }
+
+    #[test]
+    fn the_node_is_remembered_and_replaced() {
+        let connection = connection();
+        assert_eq!(node(&connection).unwrap(), None);
+        set_node(&connection, "127.0.0.1:50001").unwrap();
+        assert_eq!(
+            node(&connection).unwrap().as_deref(),
+            Some("127.0.0.1:50001")
+        );
+        set_node(&connection, "10.0.0.2:50001").unwrap();
+        assert_eq!(
+            node(&connection).unwrap().as_deref(),
+            Some("10.0.0.2:50001")
+        );
     }
 
     fn keys_fixture() -> ScanKeys {
